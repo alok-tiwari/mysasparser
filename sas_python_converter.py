@@ -1190,78 +1190,6 @@ class SASPythonConverter:
         
         return expr
     
-    def _convert_data_step(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
-        """Convert a DATA step to Python."""
-        # Extract input datasets
-        set_match = re.search(r'SET\s+(.*?);', component.content, re.IGNORECASE)
-        
-        if set_match:
-            input_datasets = [ds.strip() for ds in set_match.group(1).split()]
-            output_dataset = component.name
-            
-            code = [f"{output_dataset}_df = {input_datasets[0]}_df.copy()"]
-            
-            # Extract and convert assignments
-            assignments = re.findall(r'(\w+)\s*=\s*(.*?);', component.content)
-            for var, expr in assignments:
-                # Very basic conversion of expression
-                py_expr = expr.replace('*', '*').replace('/', '/').strip()
-                code.append(f"{output_dataset}_df['{var}'] = {py_expr}")
-                
-            return "\n".join(code)
-        
-        # Default conversion
-        return f"# TODO: Convert DATA step {component.name}\n# Original code:\n# " + component.content.replace("\n", "\n# ")
-    
-    def _convert_macro(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
-        """Convert a SAS macro to a Python function."""
-        # Extract macro parameters
-        params_match = re.search(r'%MACRO\s+\w+\s*\((.*?)\)', component.content, re.IGNORECASE)
-        
-        if params_match:
-            params_str = params_match.group(1)
-            params = [p.strip() for p in params_str.split(',')] if params_str else []
-            
-            func_def = f"def {component.name}({', '.join(params)}):"
-            
-            # Add function body as TODO
-            func_body = "    # TODO: Implement macro body\n    pass"
-            
-            return func_def + "\n" + func_body
-        
-        # Default conversion
-        return f"# TODO: Convert MACRO {component.name}\n# Original code:\n# " + component.content.replace("\n", "\n# ")
-    
-    def _convert_sql(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
-        """Convert a PROC SQL to pandas or SQLAlchemy."""
-        # Extract SQL statements
-        create_table_match = re.search(r'CREATE\s+TABLE\s+(\w+)\s+AS\s+(.*?);', 
-                                       component.content, 
-                                       re.IGNORECASE | re.DOTALL)
-        
-        if create_table_match:
-            table_name = create_table_match.group(1)
-            query = create_table_match.group(2)
-            
-            # Handle SELECT statements
-            if 'SELECT' in query.upper():
-                # Very basic conversion to pandas
-                from_match = re.search(r'FROM\s+(\w+)', query, re.IGNORECASE)
-                select_match = re.search(r'SELECT\s+(.*?)\s+FROM', query, re.IGNORECASE | re.DOTALL)
-                
-                if from_match and select_match:
-                    from_table = from_match.group(1)
-                    columns = select_match.group(1).strip()
-                    
-                    if columns == '*':
-                        return f"{table_name}_df = {from_table}_df.copy()"
-                    else:
-                        cols_list = [c.strip() for c in columns.split(',')]
-                        return f"{table_name}_df = {from_table}_df[{cols_list}]"
-        
-        # Default conversion
-        return f"# TODO: Convert SQL query\n# Original code:\n# " + component.content.replace("\n", "\n# ")
-    
     def convert_directory(self, input_dir: str) -> List[str]:
         """
         Convert all SAS files in a directory to Python.
@@ -1280,10 +1208,15 @@ class SASPythonConverter:
             try:
                 output_file = self.convert_file(str(sas_file))
                 if output_file:
-                    converted_files.append(output_file)
+                    if isinstance(output_file, dict):
+                        # If convert_file returns a dictionary, extract the file path
+                        converted_files.extend(output_file.keys())
+                    else:
+                        # If convert_file returns a string path, use that directly
+                        converted_files.append(output_file)
             except Exception as e:
                 logger.error(f"Error converting {sas_file}: {str(e)}")
-                
+                    
         return converted_files
         
     def convert_file(self, sas_file: str) -> str:
