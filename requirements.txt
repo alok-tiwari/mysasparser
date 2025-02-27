@@ -1,0 +1,7 @@
+antlr4-python3-runtime==4.13.1
+chromadb==0.4.22
+python-dotenv==1.0.0
+requests==2.31.0
+tqdm==4.66.1
+numpy==1.26.3
+pandas==2.1.4
