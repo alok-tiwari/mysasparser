@@ -270,17 +270,19 @@ class VectorStore:
         return prepared_metadata
     
     def search_similar_code(
-        self, 
-        query_text: str, 
-        n_results: int = 5,
-        collection_names: Optional[List[str]] = None,
-        metadata_filters: Optional[Dict[str, Any]] = None
+    self, 
+    query_text: str,
+    query_embedding: Optional[List[float]] = None,  # Add this parameter
+    n_results: int = 5,
+    collection_names: Optional[List[str]] = None,
+    metadata_filters: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Search for similar code across specified collections with metadata filtering.
+        Search for similar code across specified collections.
         
         Args:
             query_text: The text to search for
+            query_embedding: Optional pre-generated embedding to use directly
             n_results: Number of results to return per collection
             collection_names: List of collection names to search, or None for all
             metadata_filters: Metadata filters to apply
@@ -296,27 +298,36 @@ class VectorStore:
             search_collections = list(self.collections.keys())
         else:
             search_collections = [name for name in collection_names if name in self.collections]
-            
+                
         if not search_collections:
             logger.warning("No valid collections specified for search")
             return {"error": "No valid collections specified"}
-            
+                
         # Apply metadata filters if provided
         where_clause = None
         if metadata_filters:
             where_clause = self._build_where_clause(metadata_filters)
-            
+                
         # Search in each collection
         for collection_name in search_collections:
             try:
                 collection = self.collections[collection_name]
                 
-                query_results = collection.query(
-                    query_texts=[query_text],
-                    n_results=n_results,
-                    where=where_clause,
-                    include=["metadatas", "documents", "distances"]
-                )
+                # Use pre-generated embedding if provided
+                if query_embedding is not None:
+                    query_results = collection.query(
+                        query_embeddings=[query_embedding],
+                        n_results=n_results,
+                        where=where_clause,
+                        include=["metadatas", "documents", "distances"]
+                    )
+                else:
+                    query_results = collection.query(
+                        query_texts=[query_text],
+                        n_results=n_results,
+                        where=where_clause,
+                        include=["metadatas", "documents", "distances"]
+                    )
                 
                 # Process query results
                 results[collection_name] = {
@@ -329,10 +340,12 @@ class VectorStore:
                 if "distances" in query_results and query_results["distances"]:
                     distances = query_results["distances"][0]
                     results[collection_name]["scores"] = [1.0 - min(d, 1.0) for d in distances]
-                    
+                        
             except Exception as e:
                 logger.error(f"Error searching in collection {collection_name}: {str(e)}")
                 results[collection_name] = {"error": str(e)}
+        
+        # Rest of the method remains the same...
                 
         # Compile summary of all results
         all_results = []
@@ -540,3 +553,72 @@ class VectorStore:
             "average_search_time": self.metrics["average_search_time"],
             "collections": collection_stats
         }
+    
+    def search_with_embedding(
+    self, 
+    query_embedding: List[float],
+    n_results: int = 5,
+    collection_names: Optional[List[str]] = None,
+    metadata_filters: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Search for similar code using a pre-generated embedding vector.
+        
+        Args:
+            query_embedding: The pre-generated embedding vector
+            n_results: Number of results to return per collection
+            collection_names: List of collection names to search, or None for all
+            metadata_filters: Metadata filters to apply
+            
+        Returns:
+            Dictionary with search results per collection
+        """
+        start_time = time.time()
+        results = {}
+        
+        # Determine which collections to search
+        if collection_names is None:
+            search_collections = list(self.collections.keys())
+        else:
+            search_collections = [name for name in collection_names if name in self.collections]
+                
+        if not search_collections:
+            logger.warning("No valid collections specified for search")
+            return {"error": "No valid collections specified"}
+                
+        # Apply metadata filters if provided
+        where_clause = None
+        if metadata_filters:
+            where_clause = self._build_where_clause(metadata_filters)
+                
+        # Search in each collection
+        for collection_name in search_collections:
+            try:
+                collection = self.collections[collection_name]
+                
+                query_results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=n_results,
+                    where=where_clause,
+                    include=["metadatas", "documents", "distances"]
+                )
+                
+                # Process query results
+                results[collection_name] = {
+                    "documents": query_results.get("documents", [[]])[0],
+                    "metadatas": self._process_returned_metadatas(query_results.get("metadatas", [[]])[0]),
+                    "distances": query_results.get("distances", [[]])[0] if "distances" in query_results else []
+                }
+                    
+            except Exception as e:
+                logger.error(f"Error searching in collection {collection_name}: {str(e)}")
+                results[collection_name] = {"error": str(e)}
+                    
+        # Update metrics
+        elapsed_time = time.time() - start_time
+        results["_execution_metadata"] = {
+            "search_time_seconds": elapsed_time,
+            "collections_searched": search_collections
+        }
+        
+        return results

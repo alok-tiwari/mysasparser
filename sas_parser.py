@@ -98,7 +98,7 @@ class SASParser:
         self.nesting_stack: List[SASComponent] = []
         self.error_count = 0
         self.warning_count = 0
-        
+
     def parse_directory(self, directory_path: str) -> Generator[List[SASComponent], None, None]:
         """Parse all SAS files in a directory and its subdirectories."""
         directory = Path(directory_path)
@@ -115,6 +115,60 @@ class SASParser:
                 continue
         
         logger.info(f"Parsing complete. Processed files with {self.error_count} errors and {self.warning_count} warnings")
+    
+    def parse_directory_parallel(self, directory_path: str, max_workers: int = None) -> List[List[SASComponent]]:
+        """
+        Parse all SAS files in a directory and its subdirectories in parallel.
+        
+        Args:
+            directory_path: Path to the directory containing SAS files
+            max_workers: Maximum number of worker processes (defaults to CPU count)
+            
+        Returns:
+            List of component lists, one list per file
+        """
+        import concurrent.futures
+        from pathlib import Path
+        import os
+        
+        if max_workers is None:
+            import multiprocessing
+            max_workers = multiprocessing.cpu_count()
+        
+        directory = Path(directory_path)
+        sas_files = list(directory.rglob("*.sas"))
+        
+        all_components = []
+        
+        print(f"Found {len(sas_files)} SAS files to process with {max_workers} workers")
+        
+        # Define the helper function properly inside the method
+        def parse_file_wrapper(file_path):
+            try:
+                return self.parse_file(str(file_path))
+            except Exception as e:
+                print(f"Error parsing file {file_path}: {str(e)}")
+                return []
+        
+        # Process files in parallel
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Create a dictionary mapping futures to their corresponding files
+            future_to_file = {}
+            for file in sas_files:
+                future = executor.submit(parse_file_wrapper, file)
+                future_to_file[future] = file
+            
+            # Process results as they complete
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_file)):
+                file = future_to_file[future]
+                try:
+                    components = future.result()
+                    all_components.append(components)
+                    print(f"Processed file {i+1}/{len(sas_files)}: {file.name} - Found {len(components)} components")
+                except Exception as e:
+                    print(f"Error processing {file}: {str(e)}")
+        
+        return all_components
 
     def parse_file(self, file_path: str) -> List[SASComponent]:
         """Parse a SAS file and extract components with enhanced logic."""
