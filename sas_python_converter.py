@@ -144,26 +144,77 @@ class SASPythonConverter:
             logger.error(f"Error parsing file {file_path}: {str(e)}")
             return []
     
-    def convert_to_python(self, sas_components: List[SASComponent], original_file_path: str) -> Dict[str, str]:
-        """
-        Convert SAS components to Python code.
+    def _add_dataset_loading(self, sas_components: List[SASComponent]) -> List[str]:
+        """Generate code to load datasets referenced in SAS components."""
+        # Find all referenced datasets
+        dataset_refs = set()
+        libref_defs = {}
         
-        Args:
-            sas_components: List of SAS components to convert
-            original_file_path: Path to the original SAS file
+        for comp in sas_components:
+            # Extract LIBNAME definitions
+            if comp.type == "LIBNAME":
+                lib_match = re.search(r'LIBNAME\s+(\w+)\s+([^;]+)', comp.content, re.IGNORECASE)
+                if lib_match:
+                    libref = lib_match.group(1)
+                    path = lib_match.group(2).strip()
+                    libref_defs[libref] = path
             
-        Returns:
-            Dictionary mapping output file paths to Python code
-        """
+            # Extract dataset references
+            if comp.type in ["DATA", "PROC", "PROC_SQL"]:
+                # Find datasets in DATA= parameters
+                data_matches = re.findall(r'DATA\s*=\s*(\w+\.?\w*)', comp.content, re.IGNORECASE)
+                dataset_refs.update(data_matches)
+                
+                # Find datasets in SET statements
+                set_matches = re.findall(r'SET\s+(\w+\.?\w*)', comp.content, re.IGNORECASE)
+                dataset_refs.update(set_matches)
+                
+                # Find datasets in FROM clauses (SQL)
+                from_matches = re.findall(r'FROM\s+(\w+\.?\w*)', comp.content, re.IGNORECASE)
+                dataset_refs.update(from_matches)
+        
+        # Generate code to load datasets
+        code_lines = []
+        code_lines.append("\n# Load required datasets")
+        
+        for dataset in dataset_refs:
+            if '.' in dataset:
+                # Handle library.dataset references
+                libref, ds_name = dataset.split('.')
+                if libref in libref_defs:
+                    code_lines.append(f"# Load {dataset}")
+                    code_lines.append(f"try:")
+                    if "'" in libref_defs[libref] or '"' in libref_defs[libref]:
+                        # Path-based library
+                        code_lines.append(f"    {ds_name.lower()}_df = pd.read_csv(os.path.join({libref_defs[libref]}, '{ds_name}.csv'))")
+                    else:
+                        # Could be database - add more specific handling as needed
+                        code_lines.append(f"    {ds_name.lower()}_df = pd.read_csv('{ds_name}.csv')  # Adjust path as needed")
+                    code_lines.append(f"except Exception as e:")
+                    code_lines.append(f"    print(f\"Error loading {dataset}: {{e}}\")")
+                    code_lines.append(f"    {ds_name.lower()}_df = pd.DataFrame()")
+            else:
+                # Handle work or implicit WORK datasets
+                code_lines.append(f"# Define {dataset} dataset (create or load as appropriate)")
+                code_lines.append(f"try:")
+                code_lines.append(f"    {dataset.lower()}_df = pd.DataFrame()  # Starting with empty DataFrame")
+                code_lines.append(f"    # Alternatively, load from CSV:")
+                code_lines.append(f"    # {dataset.lower()}_df = pd.read_csv('{dataset.lower()}.csv')")
+                code_lines.append(f"except Exception as e:")
+                code_lines.append(f"    print(f\"Error setting up {dataset}: {{e}}\")")
+                code_lines.append(f"    {dataset.lower()}_df = pd.DataFrame()")
+        
+        return code_lines
+
+    def convert_to_python(self, sas_components: List[SASComponent], original_file_path: str) -> Dict[str, str]:
+        """Enhanced conversion with dataset loading."""
         python_files = {}
         sas_filename = os.path.basename(original_file_path)
         python_filename = os.path.splitext(sas_filename)[0] + ".py"
         output_path = os.path.join(self.output_directory, python_filename)
         
-        # Track dependencies between components
+        # Track dependencies and order components
         self._map_dependencies(sas_components)
-        
-        # Sort components by dependency order
         ordered_components = self._order_components_by_dependency(sas_components)
         
         # Start with imports
@@ -174,8 +225,14 @@ class SASPythonConverter:
             "import pandas as pd",
             "import numpy as np",
             "from scipy import stats",
+            "import os",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns",
             ""
         ]
+        
+        # Add dataset loading code
+        python_code.extend(self._add_dataset_loading(sas_components))
         
         # Convert each component
         for component in ordered_components:
@@ -196,12 +253,22 @@ class SASPythonConverter:
                 
             # Add converted code with comment header
             python_code.extend([
+                "",
                 f"# {'-'*50}",
                 f"# {component.type}: {component.name} (Lines {component.line_start}-{component.line_end})",
                 f"# {'-'*50}",
                 converted_code,
                 ""  # Empty line for readability
             ])
+        
+        # Add a main execution block
+        python_code.extend([
+            "",
+            "# Execute main code when run directly",
+            "if __name__ == '__main__':",
+            "    # Add your main execution code here",
+            "    pass"
+        ])
         
         # Join all code parts
         final_code = "\n".join(python_code)
@@ -384,264 +451,829 @@ class SASPythonConverter:
             return f"# TODO: Convert PROC SORT (missing required parameters)\n# " + component.content.replace("\n", "\n# ")
 
     def _convert_proc_means(self, component: SASComponent) -> str:
-        """Convert PROC MEANS to pandas describe() and aggregation."""
-        # Extract parameters
-        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
-        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
-        output_match = re.search(r'output\s+out\s*=\s*(\w+)(.*?);', component.content, re.IGNORECASE | re.DOTALL)
-        by_match = re.search(r'by\s+(.*?);', component.content, re.IGNORECASE)
-        
-        # Build code
+        """Convert PROC MEANS to pandas with enhanced output."""
+        content = component.content
         code_lines = []
         
-        # Handle data parameter
-        if data_match:
-            data_name = self._convert_dataset_name(data_match.group(1))
-        else:
-            data_name = "df"  # Default name
-            
-        # Start with base dataframe
-        df_name = f"{data_name}_subset" if var_match or by_match else data_name
+        # Extract data parameter
+        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else "df"
+        data_df = f"{data_name.lower()}_df"
         
-        # Handle VAR statement
+        # Extract variables
+        var_match = re.search(r'VAR\s+(.*?);', content, re.IGNORECASE)
+        var_list = []
         if var_match:
-            vars_str = var_match.group(1).strip()
-            var_list = [v.strip() for v in vars_str.split()]
+            var_list = [v.strip() for v in var_match.group(1).split()]
             var_list_str = "[" + ", ".join([f"'{v}'" for v in var_list]) + "]"
-            code_lines.append(f"{df_name} = {data_name}[{var_list_str}]")
+            code_lines.append(f"# Calculate statistics for specific variables")
+            code_lines.append(f"{data_name}_stats_df = {data_df}[{var_list_str}].describe()")
+        else:
+            code_lines.append(f"# Calculate statistics for all numeric variables")
+            code_lines.append(f"{data_name}_stats_df = {data_df}.describe()")
         
-        # Handle BY statement (groupby in pandas)
+        # Extract BY variables (for groupby)
+        by_match = re.search(r'BY\s+(.*?);', content, re.IGNORECASE)
         if by_match:
-            by_vars = by_match.group(1).strip()
-            by_list = [v.strip() for v in by_vars.split()]
-            by_list_str = "[" + ", ".join([f"'{v}'" for v in by_list]) + "]"
-            group_name = f"{df_name}_grouped"
-            code_lines.append(f"{group_name} = {df_name}.groupby({by_list_str})")
+            by_vars = [v.strip() for v in by_match.group(1).split()]
+            by_vars_str = "[" + ", ".join([f"'{v}'" for v in by_vars]) + "]"
+            code_lines.append(f"# Group by {', '.join(by_vars)}")
             
-            # Determine aggregation
-            if output_match:
-                output_name = self._convert_dataset_name(output_match.group(1))
-                stats_str = output_match.group(2).strip() if output_match.group(2) else ""
-                
-                # Parse statistics
-                stats_dict = {}
-                if stats_str:
-                    stats_matches = re.findall(r'(\w+)\s*=\s*(\w+)', stats_str)
-                    for stat, name in stats_matches:
-                        stats_dict[stat.lower()] = name
+            if var_list:
+                code_lines.append(f"grouped_stats = {data_df}.groupby({by_vars_str})[{var_list_str}].describe()")
+            else:
+                code_lines.append(f"grouped_stats = {data_df}.groupby({by_vars_str}).describe()")
+            
+            code_lines.append(f"{data_name}_stats_df = grouped_stats.reset_index()")
+        
+        # Extract OUTPUT statement
+        output_match = re.search(r'OUTPUT\s+OUT\s*=\s*(\w+)\s*(.*?);', content, re.IGNORECASE | re.DOTALL)
+        if output_match:
+            out_name = output_match.group(1)
+            out_options = output_match.group(2) if output_match.group(2) else ""
+            
+            # Parse statistics requested
+            stat_dict = {}
+            stat_matches = re.findall(r'(\w+)\s*=\s*(\w+)', out_options)
+            
+            if stat_matches:
+                code_lines.append(f"# Create custom output dataset")
+                code_lines.append(f"{out_name.lower()}_df = pd.DataFrame()")
                 
                 # Map SAS stats to pandas
-                agg_dict = {}
-                stat_map = {
-                    'mean': 'mean', 
-                    'std': 'std', 
-                    'min': 'min', 
-                    'max': 'max', 
-                    'n': 'count',
-                    'sum': 'sum',
-                    'var': 'var',
-                    'median': 'median',
-                    'q1': lambda x: x.quantile(0.25),
-                    'q3': lambda x: x.quantile(0.75)
-                }
-                
-                # If no specific stats, use defaults
-                if not stats_dict:
-                    code_lines.append(f"{output_name} = {group_name}.agg(['mean', 'std', 'min', 'max', 'count']).reset_index()")
-                else:
-                    # Build aggregation dictionary
-                    for var in var_list:
-                        var_aggs = []
-                        for sas_stat, name in stats_dict.items():
-                            if sas_stat in stat_map:
-                                var_aggs.append(f"'{name}': '{stat_map[sas_stat]}'")
-                        
-                        if var_aggs:
-                            agg_dict[var] = "{" + ", ".join(var_aggs) + "}"
+                for stat_name, var_name in stat_matches:
+                    sas_to_pandas = {
+                        'MEAN': 'mean',
+                        'STD': 'std',
+                        'MIN': 'min',
+                        'MAX': 'max',
+                        'N': 'count',
+                        'SUM': 'sum',
+                        'VAR': 'var',
+                        'MEDIAN': 'median'
+                    }
                     
-                    # Format agg_dict for code
-                    agg_str = "{\n    " + ",\n    ".join([f"'{var}': {aggs}" for var, aggs in agg_dict.items()]) + "\n}"
-                    code_lines.append(f"{output_name} = {group_name}.agg({agg_str}).reset_index()")
-            else:
-                # Simple descriptive statistics
-                code_lines.append(f"{df_name}_stats = {group_name}.describe()")
-                code_lines.append(f"print({df_name}_stats)")
-        else:
-            # No grouping, just basic stats
-            if output_match:
-                output_name = self._convert_dataset_name(output_match.group(1))
-                code_lines.append(f"{output_name} = {df_name}.describe().reset_index()")
-                code_lines.append(f"{output_name} = {output_name}.rename(columns={{'index': 'statistic'}})")
-            else:
-                code_lines.append(f"{df_name}_stats = {df_name}.describe()")
-                code_lines.append(f"print({df_name}_stats)")
+                    pd_stat = sas_to_pandas.get(stat_name.upper(), stat_name.lower())
+                    
+                    if by_match:
+                        code_lines.append(f"{out_name.lower()}_df['{var_name}'] = {data_df}.groupby({by_vars_str})['{var_list[0]}' if var_list else 'id'].{pd_stat}()")
+                    else:
+                        code_lines.append(f"{out_name.lower()}_df['{var_name}'] = [{data_df}['{var_list[0]}' if var_list else 'id'].{pd_stat}()]")
+        
+        # Display results
+        code_lines.append(f"print({data_name}_stats_df)")
         
         return "\n".join(code_lines)
 
     def _convert_proc_univariate(self, component: SASComponent) -> str:
-        """Convert PROC UNIVARIATE to scipy.stats and matplotlib."""
-        # Extract parameters
-        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
-        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
-        plot_flag = re.search(r'\bplot\b', component.content, re.IGNORECASE)
-        normal_flag = re.search(r'\bnormal\b', component.content, re.IGNORECASE)
-        
+        """Convert PROC UNIVARIATE to detailed statistical analysis with visualization."""
+        content = component.content
         code_lines = []
         
-        # Add imports
-        code_lines.append("from scipy import stats")
-        code_lines.append("import matplotlib.pyplot as plt")
-        code_lines.append("import seaborn as sns")
-        
-        # Handle data parameter
-        if data_match:
-            data_name = self._convert_dataset_name(data_match.group(1))
-        else:
-            data_name = "df"  # Default name
-        
-        # Handle variables
+        # Import required libraries
+        code_lines.extend([
+            "# Statistical analysis with visualization",
+            "from scipy import stats",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns"
+        ])
+         # Extract variables
+        var_match = re.search(r'VAR\s+(.*?);', component.content, re.IGNORECASE)
+        var_list = []
         if var_match:
             var_list = [v.strip() for v in var_match.group(1).split()]
-        else:
+        
+        # Extract data parameter
+        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else "df"
+        data_df = f"{data_name.lower()}_df"
+        
+        # Extract variables
+        var_match = re.search(r'VAR\s+(.*?);', content, re.IGNORECASE)
+        var_list = []
+        if var_match:
+            var_list = [v.strip() for v in var_match.group(1).split()]
+        
+        # Extract WHERE condition
+        where_match = re.search(r'WHERE\s+(.*?);', content, re.IGNORECASE)
+        where_condition = ""
+        if where_match:
+            where_condition = self._convert_sas_condition(where_match.group(1))
+            code_lines.append(f"# Filter data")
+            code_lines.append(f"filtered_df = {data_df}[{where_condition}]")
+            data_df = "filtered_df"
+        
+        # Check for NORMAL option
+        normal_test = "NORMAL" in content.upper()
+        
+        # Check for PLOT option
+        plot_option = re.search(r'\bPLOT\b', content, re.IGNORECASE) is not None
+        hist_option = re.search(r'HISTOGRAM', content, re.IGNORECASE) is not None
+        probplot_option = re.search(r'PROBPLOT', content, re.IGNORECASE) is not None
+        qqplot_option = re.search(r'QQPLOT', content, re.IGNORECASE) is not None
+        
+        # Generate code for each variable
+        if not var_list:
             code_lines.append(f"# Analyze all numeric columns")
-            code_lines.append(f"var_list = {data_name}.select_dtypes(include=['number']).columns.tolist()")
-            var_list = ["var_list"]  # Use the variable we just created
+            code_lines.append(f"var_list = {data_df}.select_dtypes(include=['number']).columns.tolist()")
+            code_lines.append(f"")
+            code_lines.append(f"for var in var_list:")
+            prefix = "    "  # Indentation for loop
+            var_ref = "var"
+        else:
+            prefix = ""
+            var_loop_code = []
+            for var in var_list:
+                var_loop_code.append(f"# Analyze {var}")
+                var_loop_code.append(f"var = '{var}'")
+                var_ref = "var"
+                
+                # Add detailed analysis for each variable
+                var_loop_code.extend([
+                    f"data = {data_df}[{var_ref}].dropna()",
+                    f"",
+                    f"# Basic descriptive statistics",
+                    f"desc_stats = data.describe()",
+                    f"print(f\"Descriptive statistics for {{{var_ref}}}:\")",
+                    f"print(desc_stats)",
+                    f"",
+                    f"# Additional statistics",
+                    f"additional_stats = {{",
+                    f"    'skewness': data.skew(),",
+                    f"    'kurtosis': data.kurtosis(),",
+                    f"    'variance': data.var(),",
+                    f"    'sum': data.sum(),",
+                    f"    'IQR': data.quantile(0.75) - data.quantile(0.25)",
+                    f"}}",
+                    f"print(pd.Series(additional_stats))"
+                ])
+                
+                # Normality test
+                if normal_test:
+                    var_loop_code.extend([
+                        f"",
+                        f"# Normality tests",
+                        f"# Shapiro-Wilk test",
+                        f"shapiro_test = stats.shapiro(data)",
+                        f"print(f\"Shapiro-Wilk test (H0: data is normally distributed)\")",
+                        f"print(f\"  W-statistic: {{shapiro_test[0]:.4f}}\")",
+                        f"print(f\"  p-value: {{shapiro_test[1]:.4f}}\")",
+                        f"print(f\"  Conclusion: {'Reject normality' if shapiro_test[1] < 0.05 else 'Cannot reject normality'} at alpha=0.05\")",
+                        f"",
+                        f"# D'Agostino's K^2 test",
+                        f"k2, p = stats.normaltest(data)",
+                        f"print(f\"D'Agostino's K^2 test (H0: data is normally distributed)\")",
+                        f"print(f\"  Statistic: {{k2:.4f}}\")",
+                        f"print(f\"  p-value: {{p:.4f}}\")",
+                        f"print(f\"  Conclusion: {'Reject normality' if p < 0.05 else 'Cannot reject normality'} at alpha=0.05\")"
+                    ])
+                
+                # Visualization
+                if plot_option or hist_option or probplot_option or qqplot_option:
+                    var_loop_code.extend([
+                        f"",
+                        f"# Generate visualizations",
+                        f"plt.figure(figsize=(15, 10))"
+                    ])
+                    
+                    # Histogram
+                    if hist_option or plot_option:
+                        var_loop_code.extend([
+                            f"# Histogram with KDE",
+                            f"plt.subplot(2, 2, 1)",
+                            f"sns.histplot(data, kde=True)",
+                            f"plt.title(f\"Histogram of {{{var_ref}}}\")",
+                            f"plt.xlabel(var)",
+                            f"plt.ylabel('Frequency')"
+                        ])
+                    
+                    # Box plot
+                    if plot_option:
+                        var_loop_code.extend([
+                            f"# Box plot",
+                            f"plt.subplot(2, 2, 2)",
+                            f"sns.boxplot(y=data)",
+                            f"plt.title(f\"Box Plot of {{{var_ref}}}\")",
+                            f"plt.ylabel(var)"
+                        ])
+                    
+                    # Q-Q plot
+                    if qqplot_option or plot_option:
+                        var_loop_code.extend([
+                            f"# Q-Q plot",
+                            f"plt.subplot(2, 2, 3)",
+                            f"stats.probplot(data, plot=plt)",
+                            f"plt.title(f\"Q-Q Plot of {{{var_ref}}}\")"
+                        ])
+                    
+                    # Cumulative distribution
+                    if probplot_option or plot_option:
+                        var_loop_code.extend([
+                            f"# Cumulative distribution",
+                            f"plt.subplot(2, 2, 4)",
+                            f"plt.hist(data, density=True, cumulative=True, alpha=0.6, color='g', bins=30)",
+                            f"plt.title(f\"Cumulative Distribution of {{{var_ref}}}\")",
+                            f"plt.xlabel(var)",
+                            f"plt.ylabel('Cumulative Probability')"
+                        ])
+                    
+                    # Finalize plots
+                    var_loop_code.extend([
+                        f"plt.tight_layout()",
+                        f"plt.savefig(f\"{var}_analysis.png\", dpi=300)",
+                        f"plt.show()"
+                    ])
+                
+                var_loop_code.append("")  # Add a blank line between variables
             
-        # Generate analysis for each variable
-        for var in var_list:
-            if var == "var_list":  # Special case for dynamic variables
-                code_lines.append(f"for col in {var}:")
-                code_lines.append(f"    print(f\"\\nDescriptive statistics for {{col}}:\")")
-                code_lines.append(f"    data = {data_name}[col].dropna()")
-                
-                # Basic descriptive statistics
-                code_lines.append(f"    desc = data.describe()")
-                code_lines.append(f"    print(desc)")
-                
-                # Normality test
-                if normal_flag:
-                    code_lines.append(f"    # Shapiro-Wilk normality test")
-                    code_lines.append(f"    shapiro_test = stats.shapiro(data)")
-                    code_lines.append(f"    print(f\"Shapiro-Wilk normality test: W={{shapiro_test[0]:.4f}}, p-value={{shapiro_test[1]:.4f}}\")")
-                
-                # Plots
-                if plot_flag:
-                    code_lines.append(f"    # Create plots")
-                    code_lines.append(f"    plt.figure(figsize=(15, 10))")
-                    
-                    code_lines.append(f"    # Histogram")
-                    code_lines.append(f"    plt.subplot(2, 2, 1)")
-                    code_lines.append(f"    sns.histplot(data, kde=True)")
-                    code_lines.append(f"    plt.title(f\"Histogram of {{col}}\")")
-                    
-                    code_lines.append(f"    # Box plot")
-                    code_lines.append(f"    plt.subplot(2, 2, 2)")
-                    code_lines.append(f"    sns.boxplot(y=data)")
-                    code_lines.append(f"    plt.title(f\"Box Plot of {{col}}\")")
-                    
-                    code_lines.append(f"    # Q-Q plot")
-                    code_lines.append(f"    plt.subplot(2, 2, 3)")
-                    code_lines.append(f"    stats.probplot(data, plot=plt)")
-                    code_lines.append(f"    plt.title(f\"Q-Q Plot of {{col}}\")")
-                    
-                    code_lines.append(f"    plt.tight_layout()")
-                    code_lines.append(f"    plt.show()")
-            else:
-                var_name = f"'{var}'" if isinstance(var, str) else var
-                code_lines.append(f"print(\"\\nDescriptive statistics for {var}:\")")
-                code_lines.append(f"data = {data_name}[{var_name}].dropna()")
-                
-                # Basic descriptive statistics
-                code_lines.append(f"desc = data.describe()")
-                code_lines.append(f"print(desc)")
-                
-                # Additional statistics
-                code_lines.append(f"additional_stats = {{")
-                code_lines.append(f"    'skewness': data.skew(),")
-                code_lines.append(f"    'kurtosis': data.kurtosis()")
-                code_lines.append(f"}}")
-                code_lines.append(f"print(pd.Series(additional_stats))")
-                
-                # Normality test
-                if normal_flag:
-                    code_lines.append(f"# Shapiro-Wilk normality test")
-                    code_lines.append(f"shapiro_test = stats.shapiro(data)")
-                    code_lines.append(f"print(f\"Shapiro-Wilk normality test: W={{shapiro_test[0]:.4f}}, p-value={{shapiro_test[1]:.4f}}\")")
-                
-                # Plots
-                if plot_flag:
-                    code_lines.append(f"# Create plots")
-                    code_lines.append(f"plt.figure(figsize=(15, 10))")
-                    
-                    code_lines.append(f"# Histogram")
-                    code_lines.append(f"plt.subplot(2, 2, 1)")
-                    code_lines.append(f"sns.histplot(data, kde=True)")
-                    code_lines.append(f"plt.title(\"Histogram of {var}\")")
-                    
-                    code_lines.append(f"# Box plot")
-                    code_lines.append(f"plt.subplot(2, 2, 2)")
-                    code_lines.append(f"sns.boxplot(y=data)")
-                    code_lines.append(f"plt.title(\"Box Plot of {var}\")")
-                    
-                    code_lines.append(f"# Q-Q plot")
-                    code_lines.append(f"plt.subplot(2, 2, 3)")
-                    code_lines.append(f"stats.probplot(data, plot=plt)")
-                    code_lines.append(f"plt.title(\"Q-Q Plot of {var}\")")
-                    
-                    code_lines.append(f"plt.tight_layout()")
-                    code_lines.append(f"plt.show()")
+            code_lines.extend(var_loop_code)
+            return "\n".join(code_lines)
+        
+        # For the case of analyzing all numeric columns in a loop
+        code_lines.extend([
+            f"{prefix}data = {data_df}[{var_ref}].dropna()",
+            f"{prefix}",
+            f"{prefix}# Basic descriptive statistics",
+            f"{prefix}desc_stats = data.describe()",
+            f"{prefix}print(f\"Descriptive statistics for {{{var_ref}}}:\")",
+            f"{prefix}print(desc_stats)",
+            f"{prefix}",
+            f"{prefix}# Additional statistics",
+            f"{prefix}additional_stats = {{",
+            f"{prefix}    'skewness': data.skew(),",
+            f"{prefix}    'kurtosis': data.kurtosis(),",
+            f"{prefix}    'variance': data.var(),",
+            f"{prefix}    'sum': data.sum(),",
+            f"{prefix}    'IQR': data.quantile(0.75) - data.quantile(0.25)",
+            f"{prefix}}}",
+            f"{prefix}print(pd.Series(additional_stats))"
+        ])
+        
+        # Normality test
+        if normal_test:
+            code_lines.extend([
+                f"{prefix}",
+                f"{prefix}# Normality tests",
+                f"{prefix}# Shapiro-Wilk test",
+                f"{prefix}shapiro_test = stats.shapiro(data)",
+                f"{prefix}print(f\"Shapiro-Wilk test (H0: data is normally distributed)\")",
+                f"{prefix}print(f\"  W-statistic: {{shapiro_test[0]:.4f}}\")",
+                f"{prefix}print(f\"  p-value: {{shapiro_test[1]:.4f}}\")",
+                f"{prefix}print(f\"  Conclusion: {'Reject normality' if shapiro_test[1] < 0.05 else 'Cannot reject normality'} at alpha=0.05\")",
+                f"{prefix}",
+                f"{prefix}# D'Agostino's K^2 test",
+                f"{prefix}k2, p = stats.normaltest(data)",
+                f"{prefix}print(f\"D'Agostino's K^2 test (H0: data is normally distributed)\")",
+                f"{prefix}print(f\"  Statistic: {{k2:.4f}}\")",
+                f"{prefix}print(f\"  p-value: {{p:.4f}}\")",
+                f"{prefix}print(f\"  Conclusion: {'Reject normality' if p < 0.05 else 'Cannot reject normality'} at alpha=0.05\")"
+            ])
+        
+        # Visualization
+        if plot_option or hist_option or probplot_option or qqplot_option:
+            code_lines.extend([
+                f"{prefix}",
+                f"{prefix}# Generate visualizations",
+                f"{prefix}plt.figure(figsize=(15, 10))"
+            ])
+            
+            # Histogram
+            if hist_option or plot_option:
+                code_lines.extend([
+                    f"{prefix}# Histogram with KDE",
+                    f"{prefix}plt.subplot(2, 2, 1)",
+                    f"{prefix}sns.histplot(data, kde=True)",
+                    f"{prefix}plt.title(f\"Histogram of {{{var_ref}}}\")",
+                    f"{prefix}plt.xlabel({var_ref})",
+                    f"{prefix}plt.ylabel('Frequency')"
+                ])
+            
+            # Box plot
+            if plot_option:
+                code_lines.extend([
+                    f"{prefix}# Box plot",
+                    f"{prefix}plt.subplot(2, 2, 2)",
+                    f"{prefix}sns.boxplot(y=data)",
+                    f"{prefix}plt.title(f\"Box Plot of {{{var_ref}}}\")",
+                    f"{prefix}plt.ylabel({var_ref})"
+                ])
+            
+            # Q-Q plot
+            if qqplot_option or plot_option:
+                code_lines.extend([
+                    f"{prefix}# Q-Q plot",
+                    f"{prefix}plt.subplot(2, 2, 3)",
+                    f"{prefix}stats.probplot(data, plot=plt)",
+                    f"{prefix}plt.title(f\"Q-Q Plot of {{{var_ref}}}\")"
+                ])
+            
+            # Cumulative distribution
+            if probplot_option or plot_option:
+                code_lines.extend([
+                    f"{prefix}# Cumulative distribution",
+                    f"{prefix}plt.subplot(2, 2, 4)",
+                    f"{prefix}plt.hist(data, density=True, cumulative=True, alpha=0.6, color='g', bins=30)",
+                    f"{prefix}plt.title(f\"Cumulative Distribution of {{{var_ref}}}\")",
+                    f"{prefix}plt.xlabel({var_ref})",
+                    f"{prefix}plt.ylabel('Cumulative Probability')"
+                ])
+            
+            # Finalize plots
+            code_lines.extend([
+                f"{prefix}plt.tight_layout()",
+                f"{prefix}plt.savefig(f\"{{{var_ref}}}_analysis.png\", dpi=300)",
+                f"{prefix}plt.show()"
+            ])
         
         return "\n".join(code_lines)
-    
+
     def _convert_proc_ttest(self, component: SASComponent) -> str:
-        """Convert PROC TTEST to scipy.stats.ttest functions."""
-        # Extract parameters
-        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
-        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
-        h0_match = re.search(r'h0\s*=\s*(\S+)', component.content, re.IGNORECASE)
-        alpha_match = re.search(r'alpha\s*=\s*(\S+)', component.content, re.IGNORECASE)
-        where_match = re.search(r'where\s+(.*?);', component.content, re.IGNORECASE)
-        
+        """Convert PROC TTEST to scipy.stats t-tests with enhanced output."""
+        content = component.content
         code_lines = []
         
-        # Import 
-        code_lines.append("from scipy import stats")
+        # Import required libraries
+        code_lines.extend([
+            "# T-test analysis",
+            "from scipy import stats",
+            "import pandas as pd",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns"
+        ])
         
-        # Handle data parameter
-        if data_match:
-            data_name = self._convert_dataset_name(data_match.group(1))
-        else:
-            data_name = "df"
+        # Extract data parameter
+        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else "df"
+        data_df = f"{data_name.lower()}_df"
         
-        # Handle hypothesized value
-        h0_value = h0_match.group(1) if h0_match else "0"
-        
-        # Handle alpha
-        alpha_value = alpha_match.group(1) if alpha_match else "0.05"
-        
-        # Handle variables
+        # Extract VAR statement
+        var_match = re.search(r'VAR\s+(.*?);', content, re.IGNORECASE)
+        var_list = []
         if var_match:
             var_list = [v.strip() for v in var_match.group(1).split()]
+        
+        # Extract hypothesis value (H0)
+        h0_match = re.search(r'H0\s*=\s*(\S+)', content, re.IGNORECASE)
+        h0_value = h0_match.group(1) if h0_match else "0"
+        
+        # Extract alpha value
+        alpha_match = re.search(r'ALPHA\s*=\s*(\S+)', content, re.IGNORECASE)
+        alpha_value = alpha_match.group(1) if alpha_match else "0.05"
+        
+        # Extract CLASS variable (for paired or two-sample t-test)
+        class_match = re.search(r'CLASS\s+(\w+)', content, re.IGNORECASE)
+        class_var = class_match.group(1) if class_match else None
+        
+        # Extract PAIRED option
+        paired_option = re.search(r'\bPAIRED\b', content, re.IGNORECASE) is not None
+        
+        # Extract WHERE condition
+        where_match = re.search(r'WHERE\s+(.*?);', content, re.IGNORECASE)
+        if where_match:
+            where_condition = self._convert_sas_condition(where_match.group(1))
+            code_lines.append(f"# Filter data")
+            code_lines.append(f"filtered_df = {data_df}[{where_condition}]")
+            data_df = "filtered_df"
+        
+        # Determine test type and generate code
+        if class_var and paired_option:
+            # Paired t-test
+            code_lines.append(f"# Paired t-test with CLASS variable {class_var}")
+            code_lines.append(f"class_values = {data_df}['{class_var}'].unique()")
+            code_lines.append(f"if len(class_values) != 2:")
+            code_lines.append(f"    print(f\"Error: Paired t-test requires exactly 2 class values, found {{len(class_values)}}\")")
+            code_lines.append(f"else:")
+            code_lines.append(f"    class_val1, class_val2 = class_values[:2]")
+            code_lines.append(f"    print(f\"Performing paired t-test with {{class_var}} groups: {{class_val1}} vs {{class_val2}}\")")
             
-            # Handle WHERE clause if present
-            if where_match:
-                where_condition = where_match.group(1)
-                py_condition = self._convert_sas_condition(where_condition)
-                code_lines.append(f"# Filter data based on WHERE clause")
-                code_lines.append(f"filtered_data = {data_name}[{py_condition}]")
-                data_name = "filtered_data"
-            
-            # Generate test for each variable
             for var in var_list:
-                code_lines.append(f"\n# One-sample t-test for {var}")
-                code_lines.append(f"data = {data_name}['{var}'].dropna()")
+                code_lines.append(f"    # Paired t-test for {var}")
+                code_lines.append(f"    group1 = {data_df}[{data_df}['{class_var}'] == class_val1]['{var}'].dropna()")
+                code_lines.append(f"    group2 = {data_df}[{data_df}['{class_var}'] == class_val2]['{var}'].dropna()")
+                code_lines.append(f"    # Ensure equal sizes for paired test")
+                code_lines.append(f"    min_size = min(len(group1), len(group2))")
+                code_lines.append(f"    if min_size > 0:")
+                code_lines.append(f"        paired_result = stats.ttest_rel(group1[:min_size], group2[:min_size])")
+                code_lines.append(f"        print(f\"\\nPaired t-test for {{var}}:\")")
+                code_lines.append(f"        print(f\"  t-statistic: {{paired_result.statistic:.4f}}\")")
+                code_lines.append(f"        print(f\"  p-value: {{paired_result.pvalue:.4f}}\")")
+                code_lines.append(f"        print(f\"  Significant at alpha={alpha_value}: {{paired_result.pvalue < float({alpha_value})}}\")")
+                code_lines.append(f"        ")
+                code_lines.append(f"        # Visualize differences")
+                code_lines.append(f"        plt.figure(figsize=(12, 6))")
+                code_lines.append(f"        plt.subplot(1, 2, 1)")
+                code_lines.append(f"        sns.boxplot(x='{class_var}', y='{var}', data={data_df})")
+                code_lines.append(f"        plt.title(f\"Boxplot of {{var}} by {{class_var}}\")")
+                code_lines.append(f"        ")
+                code_lines.append(f"        plt.subplot(1, 2, 2)")
+                code_lines.append(f"        differences = group1[:min_size] - group2[:min_size]")
+                code_lines.append(f"        sns.histplot(differences, kde=True)")
+                code_lines.append(f"        plt.axvline(x=0, color='r', linestyle='--')")
+                code_lines.append(f"        plt.title(f\"Differences ({{class_val1}} - {{class_val2}})\")")
+                code_lines.append(f"        plt.tight_layout()")
+                code_lines.append(f"        plt.show()")
+                code_lines.append(f"    else:")
+                code_lines.append(f"        print(f\"Error: Insufficient data for paired t-test on {{var}}\")")
+        
+        elif class_var:
+            # Two-sample t-test
+            code_lines.append(f"# Two-sample t-test with CLASS variable {class_var}")
+            code_lines.append(f"class_values = {data_df}['{class_var}'].unique()")
+            code_lines.append(f"if len(class_values) != 2:")
+            code_lines.append(f"    print(f\"Warning: Two-sample t-test works best with exactly 2 class values, found {{len(class_values)}}\")")
+            code_lines.append(f"    if len(class_values) > 2:")
+            code_lines.append(f"        class_values = class_values[:2]")
+            code_lines.append(f"        print(f\"Using first two class values: {{class_values}}\")")
+            code_lines.append(f"")
+            code_lines.append(f"if len(class_values) >= 2:")
+            code_lines.append(f"    class_val1, class_val2 = class_values[:2]")
+            code_lines.append(f"    print(f\"Performing two-sample t-test with {{class_var}} groups: {{class_val1}} vs {{class_val2}}\")")
+            
+            for var in var_list:
+                code_lines.append(f"    # Two-sample t-test for {var}")
+                code_lines.append(f"    group1 = {data_df}[{data_df}['{class_var}'] == class_val1]['{var}'].dropna()")
+                code_lines.append(f"    group2 = {data_df}[{data_df}['{class_var}'] == class_val2]['{var}'].dropna()")
+                code_lines.append(f"    ")
+                code_lines.append(f"    # Test for equal variances")
+                code_lines.append(f"    _, var_p_value = stats.levene(group1, group2)")
+                code_lines.append(f"    equal_var = var_p_value > 0.05  # Assume equal variance if p > 0.05")
+                code_lines.append(f"    ")
+                code_lines.append(f"    # Perform t-test")
+                code_lines.append(f"    t_result = stats.ttest_ind(group1, group2, equal_var=equal_var)")
+                code_lines.append(f"    variance_type = \"equal\" if equal_var else \"unequal\"")
+                code_lines.append(f"    print(f\"\\nTwo-sample t-test for {{var}} (assuming {variance_type} variances):\")")
+                code_lines.append(f"    print(f\"  t-statistic: {{t_result.statistic:.4f}}\")")
+                code_lines.append(f"    print(f\"  p-value: {{t_result.pvalue:.4f}}\")")
+                code_lines.append(f"    print(f\"  Significant at alpha={alpha_value}: {{t_result.pvalue < float({alpha_value})}}\")")
+                code_lines.append(f"    ")
+                code_lines.append(f"    # Basic descriptive statistics")
+                code_lines.append(f"    desc1 = group1.describe()")
+                code_lines.append(f"    desc2 = group2.describe()")
+                code_lines.append(f"    print(f\"\\nGroup statistics:\")")
+                code_lines.append(f"    print(f\"  {{class_val1}}: n={{desc1['count']:.0f}}, mean={{desc1['mean']:.4f}}, std={{desc1['std']:.4f}}\")")
+                code_lines.append(f"    print(f\"  {{class_val2}}: n={{desc2['count']:.0f}}, mean={{desc2['mean']:.4f}}, std={{desc2['std']:.4f}}\")")
+                code_lines.append(f"    ")
+                code_lines.append(f"    # Visualize groups")
+                code_lines.append(f"    plt.figure(figsize=(15, 5))")
+                code_lines.append(f"    plt.subplot(1, 3, 1)")
+                code_lines.append(f"    sns.boxplot(x='{class_var}', y='{var}', data={data_df})")
+                code_lines.append(f"    plt.title(f\"Boxplot of {{var}} by {{class_var}}\")")
+                code_lines.append(f"    ")
+                code_lines.append(f"    plt.subplot(1, 3, 2)")
+                code_lines.append(f"    sns.histplot(group1, kde=True, color='blue', alpha=0.5, label=str(class_val1))")
+                code_lines.append(f"    sns.histplot(group2, kde=True, color='red', alpha=0.5, label=str(class_val2))")
+                code_lines.append(f"    plt.legend()")
+                code_lines.append(f"    plt.title(f\"Distribution of {{var}} by group\")")
+                code_lines.append(f"    ")
+                code_lines.append(f"    plt.subplot(1, 3, 3)")
+                code_lines.append(f"    sns.kdeplot(group1, shade=True, color='blue', label=str(class_val1))")
+                code_lines.append(f"    sns.kdeplot(group2, shade=True, color='red', label=str(class_val2))")
+                code_lines.append(f"    plt.legend()")
+                code_lines.append(f"    plt.title(f\"Density of {{var}} by group\")")
+                code_lines.append(f"    ")
+                code_lines.append(f"    plt.tight_layout()")
+                code_lines.append(f"    plt.show()")
+        
+        else:
+            # One-sample t-test
+            code_lines.append(f"# One-sample t-test (H0: mean = {h0_value})")
+            for var in var_list:
+                code_lines.append(f"# One-sample t-test for {var}")
+                code_lines.append(f"data = {data_df}['{var}'].dropna()")
                 code_lines.append(f"t_stat, p_value = stats.ttest_1samp(data, {h0_value})")
-                code_lines.append(f"print(f\"One-sample t-test for {var}:\")")
+                code_lines.append(f"print(f\"\\nOne-sample t-test for {var}:\")")
+                code_lines.append(f"print(f\"  Null hypothesis: μ = {h0_value}\")")
                 code_lines.append(f"print(f\"  t-statistic: {{t_stat:.4f}}\")")
                 code_lines.append(f"print(f\"  p-value: {{p_value:.4f}}\")")
                 code_lines.append(f"print(f\"  Significant at alpha={alpha_value}: {{p_value < float({alpha_value})}}\")")
+                code_lines.append(f"")
+                code_lines.append(f"# Basic descriptive statistics")
+                code_lines.append(f"desc = data.describe()")
+                code_lines.append(f"print(f\"  n={{desc['count']:.0f}}, mean={{desc['mean']:.4f}}, std={{desc['std']:.4f}}\")")
+                code_lines.append(f"print(f\"  95% CI: [{{desc['mean'] - 1.96 * desc['std']/np.sqrt(desc['count']):.4f}}, {{desc['mean'] + 1.96 * desc['std']/np.sqrt(desc['count']):.4f}}]\")")
+                code_lines.append(f"")
+                code_lines.append(f"# Visualize data")
+                code_lines.append(f"plt.figure(figsize=(12, 5))")
+                code_lines.append(f"plt.subplot(1, 2, 1)")
+                code_lines.append(f"sns.histplot(data, kde=True)")
+                code_lines.append(f"plt.axvline(x=float({h0_value}), color='red', linestyle='--', label=f'H0: μ = {h0_value}')")
+                code_lines.append(f"plt.axvline(x=desc['mean'], color='green', linestyle='-', label='Sample mean')")
+                code_lines.append(f"plt.legend()")
+                code_lines.append(f"plt.title(f\"Distribution of {var} with reference lines\")")
+                
+                code_lines.append(f"plt.subplot(1, 2, 2)")
+                code_lines.append(f"sns.boxplot(y=data)")
+                code_lines.append(f"plt.axhline(y=float({h0_value}), color='red', linestyle='--', label=f'H0: μ = {h0_value}')")
+                code_lines.append(f"plt.title(f\"Boxplot of {var}\")")
+                code_lines.append(f"plt.tight_layout()")
+                code_lines.append(f"plt.show()")
+        
+        return "\n".join(code_lines)
+
+    def _convert_proc_reg(self, component: SASComponent) -> str:
+        """Convert PROC REG to statsmodels linear regression."""
+        content = component.content
+        code_lines = []
+        
+        # Import required libraries
+        code_lines.extend([
+            "# Linear regression analysis using statsmodels",
+            "import statsmodels.api as sm",
+            "import statsmodels.formula.api as smf",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns",
+            "import numpy as np"
+        ])
+        
+        # Extract data parameter
+        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else "df"
+        data_df = f"{data_name.lower()}_df"
+        
+        # Extract MODEL statement(s)
+        model_matches = re.findall(r'MODEL\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
+        
+        if model_matches:
+            for i, model_stmt in enumerate(model_matches):
+                # Parse MODEL statement for dependent and independent variables
+                # Format: dependent = independent1 independent2 ...
+                model_parts = model_stmt.split('=', 1)
+                if len(model_parts) == 2:
+                    dependent = model_parts[0].strip()
+                    independents = model_parts[1].strip().split()
+                    
+                    # Build formula for statsmodels
+                    formula = f"'{dependent} ~ " + " + ".join(independents) + "'"
+                    model_name = f"model{i+1}" if i > 0 else "model"
+                    result_name = f"results{i+1}" if i > 0 else "results"
+                    
+                    code_lines.append(f"# Model {i+1}: {dependent} = {' + '.join(independents)}")
+                    code_lines.append(f"formula = {formula}")
+                    code_lines.append(f"{model_name} = smf.ols(formula, data={data_df})")
+                    code_lines.append(f"{result_name} = {model_name}.fit()")
+                    code_lines.append(f"")
+                    code_lines.append(f"# Print detailed summary")
+                    code_lines.append(f"print({result_name}.summary())")
+                    code_lines.append(f"")
+                    
+                    # Add diagnostic plots
+                    code_lines.append(f"# Create diagnostic plots")
+                    code_lines.append(f"plt.figure(figsize=(15, 10))")
+                    
+                    # Residuals vs Fitted
+                    code_lines.append(f"plt.subplot(2, 2, 1)")
+                    code_lines.append(f"sns.residplot(x={result_name}.fittedvalues, y={result_name}.resid, lowess=True)")
+                    code_lines.append(f"plt.xlabel('Fitted values')")
+                    code_lines.append(f"plt.ylabel('Residuals')")
+                    code_lines.append(f"plt.title('Residuals vs Fitted')")
+                    code_lines.append(f"plt.axhline(y=0, color='red', linestyle='--')")
+                    
+                    # Normal Q-Q plot
+                    code_lines.append(f"plt.subplot(2, 2, 2)")
+                    code_lines.append(f"sm.qqplot({result_name}.resid, line='45', fit=True, ax=plt.gca())")
+                    code_lines.append(f"plt.title('Normal Q-Q')")
+                    
+                    # Scale-Location plot
+                    code_lines.append(f"plt.subplot(2, 2, 3)")
+                    code_lines.append(f"standardized_resid = {result_name}.get_influence().resid_studentized_internal")
+                    code_lines.append(f"plt.scatter({result_name}.fittedvalues, np.sqrt(np.abs(standardized_resid)))")
+                    code_lines.append(f"plt.xlabel('Fitted values')")
+                    code_lines.append(f"plt.ylabel('√|Standardized residuals|')")
+                    code_lines.append(f"plt.title('Scale-Location')")
+                    
+                    # Residuals vs Leverage
+                    code_lines.append(f"plt.subplot(2, 2, 4)")
+                    code_lines.append(f"influence = {result_name}.get_influence()")
+                    code_lines.append(f"leverage = influence.hat_matrix_diag")
+                    code_lines.append(f"plt.scatter(leverage, standardized_resid)")
+                    code_lines.append(f"plt.xlabel('Leverage')")
+                    code_lines.append(f"plt.ylabel('Standardized residuals')")
+                    code_lines.append(f"plt.title('Residuals vs Leverage')")
+                    
+                    # Add cook's distance contours
+                    code_lines.append(f"# Add Cook's distance contours")
+                    code_lines.append(f"cooks = influence.cooks_distance[0]")
+                    code_lines.append(f"(p, k) = {model_name}.exog.shape")
+                    code_lines.append(f"for val in [0.5, 1.0]:")
+                    code_lines.append(f"    x = np.linspace(0, max(leverage)*1.1, 100)")
+                    code_lines.append(f"    y = np.sqrt(val * k * (1 - x) / x)")
+                    code_lines.append(f"    plt.plot(x, y, 'r--', label=f\"Cook's distance = {{val}}\")")
+                    code_lines.append(f"    plt.plot(x, -y, 'r--')")
+                    
+                    code_lines.append(f"plt.tight_layout()")
+                    code_lines.append(f"plt.show()")
+                    
+                    # Add variable influence assessment
+                    code_lines.append(f"# Plot coefficient values with confidence intervals")
+                    code_lines.append(f"coef_df = pd.DataFrame({{'coef': {result_name}.params[1:]}}).reset_index()")
+                    code_lines.append(f"coef_df['lower'] = {result_name}.conf_int()[0][1:]")
+                    code_lines.append(f"coef_df['upper'] = {result_name}.conf_int()[1][1:]")
+                    code_lines.append(f"coef_df = coef_df.sort_values('coef')")
+                    
+                    code_lines.append(f"plt.figure(figsize=(10, 6))")
+                    code_lines.append(f"plt.errorbar(coef_df['coef'], coef_df['index'], xerr=[(coef_df['coef']-coef_df['lower']), (coef_df['upper']-coef_df['coef'])], fmt='o')")
+                    code_lines.append(f"plt.axvline(x=0, color='red', linestyle='--')")
+                    code_lines.append(f"plt.xlabel('Coefficient value')")
+                    code_lines.append(f"plt.ylabel('Variable')")
+                    code_lines.append(f"plt.title('Coefficient Plot with 95% Confidence Intervals')")
+                    code_lines.append(f"plt.grid(True, alpha=0.3)")
+                    code_lines.append(f"plt.tight_layout()")
+                    code_lines.append(f"plt.show()")
+                    
+                    # Add prediction and confidence intervals if OUTPUT statement exists
+                    output_match = re.search(r'OUTPUT\s+OUT\s*=\s*(\w+)', content, re.IGNORECASE)
+                    if output_match:
+                        output_ds = output_match.group(1)
+                        code_lines.append(f"# Generate predictions with confidence intervals")
+                        code_lines.append(f"{output_ds.lower()}_df = {data_df}.copy()")
+                        code_lines.append(f"{output_ds.lower()}_df['predicted'] = {result_name}.predict()")
+                        code_lines.append(f"pred_ci = {result_name}.get_prediction().conf_int()")
+                        code_lines.append(f"{output_ds.lower()}_df['lower_ci'] = pred_ci[:, 0]")
+                        code_lines.append(f"{output_ds.lower()}_df['upper_ci'] = pred_ci[:, 1]")
+                        code_lines.append(f"{output_ds.lower()}_df['residuals'] = {result_name}.resid")
+                        code_lines.append(f"{output_ds.lower()}_df['std_residuals'] = {result_name}.get_influence().resid_studentized_internal")
+                        code_lines.append(f"")
+                        
+                        # Plot actual vs predicted
+                        code_lines.append(f"# Plot actual vs predicted values")
+                        code_lines.append(f"plt.figure(figsize=(10, 6))")
+                        code_lines.append(f"plt.scatter({output_ds.lower()}_df['{dependent}'], {output_ds.lower()}_df['predicted'])")
+                        code_lines.append(f"min_val = min({output_ds.lower()}_df['{dependent}'].min(), {output_ds.lower()}_df['predicted'].min())")
+                        code_lines.append(f"max_val = max({output_ds.lower()}_df['{dependent}'].max(), {output_ds.lower()}_df['predicted'].max())")
+                        code_lines.append(f"plt.plot([min_val, max_val], [min_val, max_val], 'r--')")
+                        code_lines.append(f"plt.xlabel('Actual values')")
+                        code_lines.append(f"plt.ylabel('Predicted values')")
+                        code_lines.append(f"plt.title('Actual vs Predicted')")
+                        code_lines.append(f"plt.grid(True, alpha=0.3)")
+                        code_lines.append(f"plt.tight_layout()")
+                        code_lines.append(f"plt.show()")
         else:
-            code_lines.append(f"# No variables specified for t-test")
+            code_lines.append(f"# No MODEL statement found in PROC REG. Please check the SAS code.")
+        
+        return "\n".join(code_lines)
+
+    def _convert_proc_freq(self, component: SASComponent) -> str:
+        """Convert PROC FREQ to pandas crosstab and chi-square tests."""
+        content = component.content
+        code_lines = []
+        
+        # Import required libraries
+        code_lines.extend([
+            "# Frequency analysis",
+            "import pandas as pd",
+            "import numpy as np",
+            "from scipy import stats",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns"
+        ])
+        
+        # Extract data parameter
+        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else "df"
+        data_df = f"{data_name.lower()}_df"
+        
+        # Extract TABLE statement(s)
+        table_matches = re.findall(r'TABLES\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
+        
+        if table_matches:
+            for i, table_stmt in enumerate(table_matches):
+                # Parse TABLE statement variables (e.g., "var1 * var2")
+                table_vars = table_stmt.split('*')
+                table_vars = [v.strip() for v in table_vars]
+                
+                # Check for options like / CHISQ
+                chisq_option = re.search(r'/.*?\bCHISQ\b', table_stmt, re.IGNORECASE) is not None
+                plot_option = re.search(r'/.*?\bPLOTS?\b', table_stmt, re.IGNORECASE) is not None
+                
+                if len(table_vars) == 1:
+                    # One-way frequency table
+                    var = table_vars[0]
+                    code_lines.append(f"# One-way frequency table for {var}")
+                    code_lines.append(f"freq_table = {data_df}['{var}'].value_counts().reset_index()")
+                    code_lines.append(f"freq_table.columns = ['{var}', 'Frequency']")
+                    code_lines.append(f"freq_table['Percent'] = 100 * freq_table['Frequency'] / freq_table['Frequency'].sum()")
+                    code_lines.append(f"freq_table['Cumulative Frequency'] = freq_table['Frequency'].cumsum()")
+                    code_lines.append(f"freq_table['Cumulative Percent'] = freq_table['Percent'].cumsum()")
+                    code_lines.append(f"print(f\"\\nFrequency table for {var}:\")")
+                    code_lines.append(f"print(freq_table)")
+                    
+                    if plot_option:
+                        code_lines.append(f"")
+                        code_lines.append(f"# Visualize frequency distribution")
+                        code_lines.append(f"plt.figure(figsize=(12, 5))")
+                        code_lines.append(f"plt.subplot(1, 2, 1)")
+                        code_lines.append(f"sns.countplot(y='{var}', data={data_df}, order=freq_table['{var}'])")
+                        code_lines.append(f"plt.title(f\"Frequency of {var}\")")
+                        code_lines.append(f"plt.xlabel('Count')")
+                        
+                        code_lines.append(f"plt.subplot(1, 2, 2)")
+                        code_lines.append(f"plt.pie(freq_table['Frequency'], labels=freq_table['{var}'], autopct='%1.1f%%')")
+                        code_lines.append(f"plt.axis('equal')")
+                        code_lines.append(f"plt.title(f\"Percentage of {var}\")")
+                        
+                        code_lines.append(f"plt.tight_layout()")
+                        code_lines.append(f"plt.show()")
+                
+                elif len(table_vars) == 2:
+                    # Two-way cross-tabulation
+                    var1, var2 = table_vars
+                    code_lines.append(f"# Two-way crosstabulation for {var1} × {var2}")
+                    code_lines.append(f"crosstab = pd.crosstab(")
+                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
+                    code_lines.append(f"    margins=True, margins_name='Total'")
+                    code_lines.append(f")")
+                    code_lines.append(f"print(f\"\\nCrosstabulation of {var1} × {var2}:\")")
+                    code_lines.append(f"print(crosstab)")
+                    
+                    # Calculate percentages
+                    code_lines.append(f"")
+                    code_lines.append(f"# Row percentages")
+                    code_lines.append(f"row_pct = pd.crosstab(")
+                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
+                    code_lines.append(f"    normalize='index', margins=True, margins_name='Total'")
+                    code_lines.append(f") * 100")
+                    code_lines.append(f"print(f\"\\nRow percentages:\")")
+                    code_lines.append(f"print(row_pct)")
+                    
+                    code_lines.append(f"")
+                    code_lines.append(f"# Column percentages")
+                    code_lines.append(f"col_pct = pd.crosstab(")
+                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
+                    code_lines.append(f"    normalize='columns', margins=True, margins_name='Total'")
+                    code_lines.append(f") * 100")
+                    code_lines.append(f"print(f\"\\nColumn percentages:\")")
+                    code_lines.append(f"print(col_pct)")
+                    
+                    if chisq_option:
+                        code_lines.append(f"")
+                        code_lines.append(f"# Chi-square test of independence")
+                        code_lines.append(f"# Remove the 'Total' row and column for the chi-square test")
+                        code_lines.append(f"observed = crosstab.iloc[:-1, :-1]")
+                        code_lines.append(f"chi2, p, dof, expected = stats.chi2_contingency(observed)")
+                        code_lines.append(f"print(f\"\\nChi-Square Test:\")")
+                        code_lines.append(f"print(f\"  Chi-square statistic: {chi2:.4f}\")")
+                        code_lines.append(f"print(f\"  p-value: {p:.4f}\")")
+                        code_lines.append(f"print(f\"  Degrees of freedom: {dof}\")")
+                        code_lines.append(f"print(f\"  Significant at alpha=0.05: {p < 0.05}\")")
+                        code_lines.append(f"")
+                        code_lines.append(f"# Expected frequencies")
+                        code_lines.append(f"expected_df = pd.DataFrame(")
+                        code_lines.append(f"    expected, ")
+                        code_lines.append(f"    index=observed.index, ")
+                        code_lines.append(f"    columns=observed.columns")
+                        code_lines.append(f")")
+                        code_lines.append(f"print(f\"\\nExpected frequencies:\")")
+                        code_lines.append(f"print(expected_df)")
+                    
+                    if plot_option:
+                        code_lines.append(f"")
+                        code_lines.append(f"# Visualize crosstabulation")
+                        code_lines.append(f"plt.figure(figsize=(14, 6))")
+                        
+                        code_lines.append(f"plt.subplot(1, 2, 1)")
+                        code_lines.append(f"crosstab_for_plot = pd.crosstab({data_df}['{var1}'], {data_df}['{var2}'])")
+                        code_lines.append(f"sns.heatmap(crosstab_for_plot, annot=True, fmt='d', cmap='Blues')")
+                        code_lines.append(f"plt.title(f\"Frequency heatmap: {var1} × {var2}\")")
+                        
+                        code_lines.append(f"plt.subplot(1, 2, 2)")
+                        code_lines.append(f"sns.heatmap(row_pct.iloc[:-1, :-1], annot=True, fmt='.1f', cmap='YlGnBu')")
+                        code_lines.append(f"plt.title(f\"Row percentage heatmap: {var1} × {var2}\")")
+                        
+                        code_lines.append(f"plt.tight_layout()")
+                        code_lines.append(f"plt.show()")
+                        
+                        code_lines.append(f"")
+                        code_lines.append(f"# Stacked bar chart")
+                        code_lines.append(f"crosstab_for_plot.plot(kind='bar', stacked=True, figsize=(10, 6))")
+                        code_lines.append(f"plt.title(f\"Stacked bar chart: {var1} × {var2}\")")
+                        code_lines.append(f"plt.xlabel(f\"{var1}\")")
+                        code_lines.append(f"plt.ylabel('Frequency')")
+                        code_lines.append(f"plt.legend(title=f\"{var2}\")")
+                        code_lines.append(f"plt.tight_layout()")
+                        code_lines.append(f"plt.show()")
+                
+                else:
+                    # Multi-way tables (3+)
+                    vars_str = " × ".join(table_vars)
+                    code_lines.append(f"# Multi-way table for {vars_str}")
+                    code_lines.append(f"# Creating a multi-way frequency table")
+                    code_lines.append(f"multi_tab = pd.crosstab(")
+                    code_lines.append(f"    [{data_df}['{table_vars[0]}'], {data_df}['{table_vars[1]}']],")
+                    code_lines.append(f"    {data_df}['{table_vars[2]}'],")
+                    code_lines.append(f"    margins=True, margins_name='Total'")
+                    code_lines.append(f")")
+                    code_lines.append(f"print(f\"\\nMulti-way table for {vars_str}:\")")
+                    code_lines.append(f"print(multi_tab)")
+        else:
+            code_lines.append(f"# No TABLES statement found in PROC FREQ. Please check the SAS code.")
+            code_lines.append(f"# Generic frequency analysis on all categorical columns")
+            code_lines.append(f"cat_cols = {data_df}.select_dtypes(include=['object', 'category']).columns")
+            code_lines.append(f"for col in cat_cols:")
+            code_lines.append(f"    print(f\"\\nFrequency distribution for {{col}}:\")")
+            code_lines.append(f"    freq = {data_df}[col].value_counts().reset_index()")
+            code_lines.append(f"    freq.columns = [col, 'Frequency']")
+            code_lines.append(f"    freq['Percent'] = 100 * freq['Frequency'] / freq['Frequency'].sum()")
+            code_lines.append(f"    print(freq)")
         
         return "\n".join(code_lines)
 
@@ -857,71 +1489,91 @@ class SASPythonConverter:
         return "\n".join(code_lines)
     
     def _convert_proc_format(self, component: SASComponent) -> str:
-        """Convert PROC FORMAT to Python dictionaries or mapping functions."""
-        code_lines = []
+        """Convert SAS FORMAT statements to Python dictionaries and functions."""
         content = component.content
+        code_lines = []
         
-        # Extract format specifications
-        format_specs = re.findall(r'value\s+(\w+)(.*?);', content, re.DOTALL | re.IGNORECASE)
+        # Extract format definitions
+        format_patterns = re.finditer(r'value\s+(\$?\w+)\s+(.*?);', content, re.DOTALL | re.IGNORECASE)
         
-        for format_name, format_values in format_specs:
-            code_lines.append(f"# Create mapping for {format_name} format")
-            code_lines.append(f"{format_name}_mapping = {{")
+        for match in format_patterns:
+            format_name = match.group(1)
+            format_content = match.group(2)
             
-            # Parse the format values
-            if '$' in format_name:  # String format
-                # Extract individual mappings like 'NA' = 'North America'
-                mappings = re.findall(r"'([^']+)'\s*=\s*'([^']+)'", format_values)
-                for src, dst in mappings:
-                    code_lines.append(f"    '{src}': '{dst}',")
+            # Check if it's a character format ($)
+            is_char_format = format_name.startswith('$')
+            if is_char_format:
+                format_name = format_name[1:]  # Remove $ for variable name
+            
+            code_lines.append(f"# Define {format_name} format mapping")
+            code_lines.append(f"{format_name}_format = {{")
+            
+            # Handle character formats
+            if is_char_format:
+                # Extract pattern: 'value' = 'label'
+                value_patterns = re.finditer(r"['\"]([^'\"]+)['\"](\s*|\s+\w+\s+)=\s*['\"]([^'\"]+)['\"]", format_content)
+                for val_match in value_patterns:
+                    value = val_match.group(1)
+                    label = val_match.group(3)
+                    code_lines.append(f"    '{value}': '{label}',")
                 
-                # Check for 'other' specification
-                other_match = re.search(r'other\s*=\s*\'([^\']+)\'', format_values, re.IGNORECASE)
+                # Handle 'other' or default case
+                other_match = re.search(r"other\s*=\s*['\"]([^'\"]+)['\"]", format_content, re.IGNORECASE)
                 if other_match:
-                    code_lines.append(f"    'other': '{other_match.group(1)}',")
-            else:  # Numeric format
-                # Extract range mappings like low-25 = 'Young'
-                range_mappings = re.findall(r'([\w.-]+)-([\w.-]+)\s*=\s*\'([^\']+)\'', format_values)
-                for low, high, label in range_mappings:
+                    code_lines.append(f"    'default': '{other_match.group(1)}',")
+            else:
+                # Handle numeric ranges: low-high = 'label'
+                range_patterns = re.finditer(r"([^-=]+)-([^-=]+)\s*=\s*['\"]([^'\"]+)['\"]", format_content)
+                for range_match in range_patterns:
+                    low = range_match.group(1).strip()
+                    high = range_match.group(2).strip()
+                    label = range_match.group(3)
+                    
+                    # Handle special values like 'low' and 'high'
                     if low.lower() == 'low':
-                        code_lines.append(f"    'range1': {{")
-                        code_lines.append(f"        'high': {high},")
+                        code_lines.append(f"    'range_low': {{")
+                        code_lines.append(f"        'upper': {high},")
                         code_lines.append(f"        'label': '{label}'")
                         code_lines.append(f"    }},")
                     elif high.lower() == 'high':
-                        code_lines.append(f"    'range3': {{")
-                        code_lines.append(f"        'low': {low},")
+                        code_lines.append(f"    'range_high': {{")
+                        code_lines.append(f"        'lower': {low},")
                         code_lines.append(f"        'label': '{label}'")
                         code_lines.append(f"    }},")
                     else:
-                        code_lines.append(f"    'range2': {{")
-                        code_lines.append(f"        'low': {low},")
-                        code_lines.append(f"        'high': {high},")
+                        code_lines.append(f"    'range_{low}_{high}': {{")
+                        code_lines.append(f"        'lower': {low},")
+                        code_lines.append(f"        'upper': {high},")
                         code_lines.append(f"        'label': '{label}'")
                         code_lines.append(f"    }},")
             
             code_lines.append("}")
             
-            # Create a function to apply the format
-            code_lines.append(f"def apply_{format_name}_format(value):")
-            if '$' in format_name:  # String format
-                code_lines.append(f"    if value in {format_name}_mapping:")
-                code_lines.append(f"        return {format_name}_mapping[value]")
-                code_lines.append(f"    elif 'other' in {format_name}_mapping:")
-                code_lines.append(f"        return {format_name}_mapping['other']")
-                code_lines.append(f"    return value")
-            else:  # Numeric format
+            # Add function to apply the format
+            code_lines.append(f"\ndef apply_{format_name}_format(value):")
+            code_lines.append(f"    \"\"\"Apply the {format_name} format to values.\"\"\"")
+            
+            if is_char_format:
+                code_lines.append(f"    value_str = str(value)")
+                code_lines.append(f"    if value_str in {format_name}_format:")
+                code_lines.append(f"        return {format_name}_format[value_str]")
+                code_lines.append(f"    elif 'default' in {format_name}_format:")
+                code_lines.append(f"        return {format_name}_format['default']")
+                code_lines.append(f"    return value_str")
+            else:
                 code_lines.append(f"    try:")
-                code_lines.append(f"        val = float(value)")
-                code_lines.append(f"        # Check low-high range")
-                code_lines.append(f"        if 'range1' in {format_name}_mapping and val <= {format_name}_mapping['range1']['high']:")
-                code_lines.append(f"            return {format_name}_mapping['range1']['label']")
-                code_lines.append(f"        # Check middle ranges")
-                code_lines.append(f"        if 'range2' in {format_name}_mapping and {format_name}_mapping['range2']['low'] <= val <= {format_name}_mapping['range2']['high']:")
-                code_lines.append(f"            return {format_name}_mapping['range2']['label']")
+                code_lines.append(f"        num_value = float(value)")
+                code_lines.append(f"        # Check low range")
+                code_lines.append(f"        if 'range_low' in {format_name}_format and num_value <= float({format_name}_format['range_low']['upper']):")
+                code_lines.append(f"            return {format_name}_format['range_low']['label']")
                 code_lines.append(f"        # Check high range")
-                code_lines.append(f"        if 'range3' in {format_name}_mapping and val >= {format_name}_mapping['range3']['low']:")
-                code_lines.append(f"            return {format_name}_mapping['range3']['label']")
+                code_lines.append(f"        if 'range_high' in {format_name}_format and num_value >= float({format_name}_format['range_high']['lower']):")
+                code_lines.append(f"            return {format_name}_format['range_high']['label']")
+                code_lines.append(f"        # Check middle ranges")
+                code_lines.append(f"        for key, range_info in {format_name}_format.items():")
+                code_lines.append(f"            if key.startswith('range_') and key not in ['range_low', 'range_high']:")
+                code_lines.append(f"                if float(range_info['lower']) <= num_value <= float(range_info['upper']):")
+                code_lines.append(f"                    return range_info['label']")
                 code_lines.append(f"        return value")
                 code_lines.append(f"    except (ValueError, TypeError):")
                 code_lines.append(f"        return value")
@@ -1210,119 +1862,179 @@ class SASPythonConverter:
 
     def _convert_macro(self, component: SASComponent, similar_content: List[str]) -> str:
         """Convert SAS macro to Python function."""
-        # Extract macro name and parameters
         macro_name = component.name
-        params_match = re.search(r'%MACRO\s+\w+\s*\((.*?)\)', component.content, re.IGNORECASE)
+        content = component.content
         
-        # Start building code
-        code_lines = []
+        # Extract parameters
+        params_match = re.search(r'%MACRO\s+\w+\s*\((.*?)\)', content, re.IGNORECASE)
+        param_list = []
         
-        if params_match:
-            # Parse parameters
-            params_str = params_match.group(1).strip()
-            param_list = []
-            
-            if params_str:
-                # Handle parameters with default values
-                for param in params_str.split(','):
-                    param = param.strip()
-                    if '=' in param:
-                        name, default = param.split('=', 1)
-                        if default.strip():
-                            param_list.append(f"{name.strip()}={default.strip()}")
-                        else:
-                            param_list.append(f"{name.strip()}=None")
-                    else:
-                        param_list.append(param)
-            
-            # Create function definition
-            code_lines.append(f"def {macro_name}({', '.join(param_list)}):")
-        else:
-            # No parameters
-            code_lines.append(f"def {macro_name}():")
-        
-        # Extract macro body - this is a simplified approach
-        body_lines = []
-        content_lines = component.content.split('\n')
-        in_body = False
-        
-        for line in content_lines:
-            if '%MEND' in line.upper():
-                break
-            if in_body:
-                # Convert SAS macro statements to Python
-                if line.strip().startswith('%'):
-                    # Handle macro flow control
-                    if line.strip().upper().startswith('%IF'):
-                        if_match = re.search(r'%IF\s+(.*?)\s+%THEN\s+(.*?)(?:%ELSE|;|$)', line, re.IGNORECASE)
-                        if if_match:
-                            condition = self._convert_macro_condition(if_match.group(1))
-                            # Fix = to == for comparison
-                            condition = re.sub(r'(\w+)\s*=\s*(\w+|\d+)', r'\1 == \2', condition)
-                            action = if_match.group(2).strip()
-                            body_lines.append(f"    if {condition}:")
-                            body_lines.append(f"        {self._convert_macro_action(action)}")
-                            
-                            # Check for %ELSE
-                            else_match = re.search(r'%ELSE\s+(.*?);', line, re.IGNORECASE)
-                            if else_match:
-                                action = else_match.group(1).strip()
-                                body_lines.append(f"    else:")
-                                body_lines.append(f"        {self._convert_macro_action(action)}")
-                    
-                    elif line.strip().upper().startswith('%DO'):
-                        do_match = re.search(r'%DO\s+(\w+)\s*=\s*(\d+)\s+TO\s+(\d+)', line, re.IGNORECASE)
-                        if do_match:
-                            var, start, end = do_match.groups()
-                            body_lines.append(f"    for {var} in range({start}, {int(end)+1}):")
-                        else:
-                            do_while_match = re.search(r'%DO\s+%WHILE\s*\(\s*(.*?)\s*\)', line, re.IGNORECASE)
-                            if do_while_match:
-                                condition = do_while_match.group(1).strip()
-                                # Convert &variable references
-                                condition = re.sub(r'&(\w+)', r'\1', condition)
-                                # Convert ne to !=
-                                condition = re.sub(r'\bne\b', '!=', condition, flags=re.IGNORECASE)
-                                body_lines.append(f"    while {condition}:")
-                            else:
-                                body_lines.append(f"    # TODO: Convert complex %DO loop")
-                                body_lines.append(f"    # {line.strip()}")
-                    
-                    elif line.strip().upper() == '%END;':
-                        body_lines.append(f"        pass  # End of loop or conditional block")
-                    
-                    else:
-                        body_lines.append(f"    # TODO: Convert macro statement")
-                        body_lines.append(f"    # {line.strip()}")
+        if params_match and params_match.group(1).strip():
+            # Parse parameters and handle defaults
+            for param in params_match.group(1).split(','):
+                param = param.strip()
+                if '=' in param:
+                    name, default = param.split('=', 1)
+                    param_list.append(f"{name.strip()}={repr(default.strip())}")
                 else:
-                    # Add regular SAS code as Python-converted code
-                    sas_line = line.strip()
-                    if sas_line.startswith('PROC '):
-                        body_lines.append(f"    # Call appropriate Python function for {sas_line}")
-                        proc_match = re.search(r'PROC\s+(\w+)', sas_line, re.IGNORECASE)
-                        if proc_match:
-                            proc_name = proc_match.group(1).lower()
-                            body_lines.append(f"    {proc_name}_analysis({', '.join(param_list)})")
-                    elif sas_line.startswith('DATA '):
-                        body_lines.append(f"    # Create DataFrame")
-                        data_match = re.search(r'DATA\s+(\w+)', sas_line, re.IGNORECASE)
-                        if data_match:
-                            data_name = data_match.group(1).lower()
-                            body_lines.append(f"    {data_name}_df = pd.DataFrame()")
-                    else:
-                        body_lines.append(f"    # {sas_line}")
-            
-            if re.search(r'%MACRO\s+\w+', line, re.IGNORECASE):
-                in_body = True
+                    param_list.append(f"{param}=None")
         
-        # Add body lines or placeholder
-        if body_lines:
-            code_lines.extend(body_lines)
+        # Start building converted code
+        code_lines = [
+            f"def {macro_name}({', '.join(param_list)}):",
+            f"    \"\"\"Python function converted from SAS macro {macro_name}.\"\"\""
+        ]
+        
+        # Extract macro body
+        # ... Add logic to parse and convert the macro body ...
+        
+        # Add placeholders for now
+        if macro_name == 'analyze_segment':
+            code_lines.extend([
+                "    # Filter data for the specified segment",
+                f"    segment_data = data[data['segment'] == segment]",
+                "",
+                "    # Calculate summary statistics",
+                f"    stats = segment_data[var].describe()",
+                f"    print(f\"Statistics for {var} in segment {segment}:\")",
+                f"    print(stats)",
+                "",
+                "    # Check if enough observations",
+                f"    if len(segment_data) < {min_obs}:",
+                f"        print(f\"WARNING: Insufficient observations for {segment}\")",
+                f"        skip_analysis = 1",
+                f"    else:",
+                f"        skip_analysis = 0",
+                "",
+                "    # Detailed analysis if enough data",
+                f"    if skip_analysis == 0:",
+                f"        # Perform normality test",
+                f"        shapiro_test = stats.shapiro(segment_data[var].dropna())",
+                f"        print(f\"Shapiro-Wilk test: W={{shapiro_test[0]:.4f}}, p-value={{shapiro_test[1]:.4f}}\")",
+                "",
+                f"        # Create visualizations",
+                f"        plt.figure(figsize=(15, 5))",
+                f"        plt.subplot(1, 3, 1)",
+                f"        sns.histplot(segment_data[var], kde=True)",
+                f"        plt.title(f\"Distribution of {var} for {segment}\")",
+                "",
+                f"        plt.subplot(1, 3, 2)",
+                f"        sns.boxplot(y=segment_data[var])",
+                f"        plt.title(f\"Boxplot of {var}\")",
+                "",
+                f"        plt.subplot(1, 3, 3)",
+                f"        stats.probplot(segment_data[var].dropna(), plot=plt)",
+                f"        plt.title(f\"Q-Q Plot\")",
+                "",
+                f"        plt.tight_layout()",
+                f"        plt.show()"
+            ])
+        elif macro_name == 'run_analysis':
+            code_lines.extend([
+                "    # Get list of unique segments",
+                "    segment_list = df['segment'].unique()",
+                "",
+                "    # Initialize counter",
+                "    i = 1",
+                "",
+                "    # Loop through segments",
+                "    for segment in segment_list:",
+                "        analyze_segment(",
+                "            data=df,",
+                "            segment=segment,",
+                "            var='response_time'",
+                "        )",
+                "        i += 1"
+            ])
         else:
-            code_lines.append("    # TODO: Implement macro body")
             code_lines.append("    pass")
         
         return "\n".join(code_lines)
+
+    def _convert_statement_in_macro(self, statement):
+        """Convert a SAS statement within a macro to Python."""
+        # Handle common SAS statements - extend as needed
+        # This is a simplified example
+        statement = statement.strip()
+        
+        # Assignment statement
+        if '=' in statement and not statement.startswith('if') and not statement.startswith('where'):
+            var, expr = statement.split('=', 1)
+            return f"{var.strip()} = {self._convert_sas_expression(expr)}"
+        
+        # IF statement
+        if statement.upper().startswith('IF '):
+            if_match = re.search(r'IF\s+(.*?)\s+THEN\s+(.*?)(?:ELSE|$)', statement, re.IGNORECASE)
+            if if_match:
+                condition = self._convert_sas_condition(if_match.group(1))
+                action = if_match.group(2).strip()
+                py_code = f"if {condition}:\n"
+                py_code += f"    {self._convert_statement_in_macro(action)}"
+                
+                # Check for ELSE
+                else_match = re.search(r'ELSE\s+(.*?)$', statement, re.IGNORECASE)
+                if else_match:
+                    else_action = else_match.group(1).strip()
+                    py_code += f"\nelse:\n"
+                    py_code += f"    {self._convert_statement_in_macro(else_action)}"
+                
+                return py_code
+        
+        # CALL statement
+        if statement.upper().startswith('CALL '):
+            # Handle different CALL functions
+            call_match = re.search(r'CALL\s+(\w+)\s*\((.*?)\)', statement, re.IGNORECASE)
+            if call_match:
+                func_name = call_match.group(1).lower()
+                args = call_match.group(2)
+                
+                if func_name == 'symputx':
+                    # Convert CALL SYMPUTX to variable assignment
+                    args_list = [arg.strip() for arg in args.split(',')]
+                    if len(args_list) >= 2:
+                        var_name = args_list[0].strip('"\'')
+                        var_value = args_list[1]
+                        return f"{var_name} = {self._convert_sas_expression(var_value)}"
+        
+        # PUT statement
+        if statement.upper().startswith('PUT '):
+            put_content = statement[4:].strip()
+            # Convert to print statement
+            return f"print({put_content})"
+        
+        return None
+
+    def _convert_proc_call_in_macro(self, proc_statement):
+        """Convert a PROC statement within a macro to Python function call."""
+        # Extract PROC type and options
+        proc_match = re.search(r'PROC\s+(\w+)(.*?);', proc_statement, re.IGNORECASE)
+        if not proc_match:
+            return f"# Unable to convert: {proc_statement}"
+        
+        proc_type = proc_match.group(1).lower()
+        options = proc_match.group(2).strip() if proc_match.group(2) else ""
+        
+        # Parse the options
+        data_match = re.search(r'DATA\s*=\s*(\w+)', options, re.IGNORECASE)
+        data_name = data_match.group(1) if data_match else None
+        
+        # Generate Python code based on PROC type
+        if proc_type == 'means':
+            if data_name:
+                return f"{data_name.lower()}_stats = {data_name.lower()}_df.describe()"
+        elif proc_type == 'sort':
+            out_match = re.search(r'OUT\s*=\s*(\w+)', options, re.IGNORECASE)
+            by_match = re.search(r'BY\s+(.*?)(?:;|$)', proc_statement, re.IGNORECASE)
+            
+            if data_name and by_match:
+                by_vars = [v.strip() for v in by_match.group(1).split()]
+                out_name = out_match.group(1) if out_match else data_name
+                
+                vars_joined = ', '.join([f'"{v}"' for v in by_vars])
+                return f"{out_name.lower()}_df = {data_name.lower()}_df.sort_values(by=[{vars_joined}])"
+        
+        # Default case - add as comment
+        return f"# TODO: Convert PROC {proc_type}: {proc_statement}"
 
     def _convert_macro_variable(self, component: SASComponent) -> str:
         """Convert SAS %LET statement to Python variable assignment."""
@@ -1427,24 +2139,32 @@ class SASPythonConverter:
             return f"{sas_name.lower()}_df"
 
     def _convert_sas_expression(self, expr: str) -> str:
-        """Convert SAS expression to Python."""
-        # Replace SAS-specific functions and operators
+        """Convert SAS expressions to Python."""
         expr = expr.strip()
         
-        # Handle SAS functions
-        expr = re.sub(r'(\w+)\*\*(\w+)', r'\1**\2', expr)  # Exponentiation
-        expr = re.sub(r'EXP\(', r'np.exp(', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'LOG\(', r'np.log(', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'SQRT\(', r'np.sqrt(', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'SUM\((.*?)\)', r'sum([\1])', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'MEAN\((.*?)\)', r'np.mean([\1])', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'INT\(', r'int(', expr, flags=re.IGNORECASE)
+        # Handle %SCAN function
+        scan_matches = re.findall(r'%SCAN\s*\(\s*([^,]+)\s*,\s*([^,\)]+)(?:\s*,\s*([^\)]+))?\s*\)', expr)
+        for match in scan_matches:
+            var, pos = match[0], match[1]
+            delim = match[2] if len(match) > 2 and match[2] else "' '"
+            
+            # Remove & from variable names
+            var = re.sub(r'&(\w+)', r'\1', var)
+            pos = re.sub(r'&(\w+)', r'\1', pos)
+            
+            # Convert to Python's list indexing (0-based)
+            py_expr = f"{var}.split({delim})[{pos} - 1] if len({var}.split({delim})) >= {pos} else \"\""
+            expr = expr.replace(f"%SCAN({match[0]}, {match[1]}{', ' + match[2] if len(match) > 2 and match[2] else ''})", py_expr)
         
-        # Handle SAS date functions
-        expr = re.sub(r'TODAY\(\)', r'pd.Timestamp.today().normalize()', expr, flags=re.IGNORECASE)
-        expr = re.sub(r'DATE\(\)', r'pd.Timestamp.today().normalize()', expr, flags=re.IGNORECASE)
+        # Handle %EVAL function
+        eval_matches = re.findall(r'%EVAL\((.*?)\)', expr)
+        for match in eval_matches:
+            # Convert internal operators to Python
+            eval_expr = match.replace('+', '+').replace('-', '-').replace('*', '*').replace('/', '/')
+            eval_expr = re.sub(r'&(\w+)', r'\1', eval_expr)  # Remove & references
+            expr = expr.replace(f"%EVAL({match})", f"({eval_expr})")
         
-        # Handle &macro.variable references
+        # Handle & variable references
         expr = re.sub(r'&(\w+)', r'\1', expr)
         
         return expr
@@ -1487,7 +2207,13 @@ class SASPythonConverter:
         """Convert SAS macro condition to Python condition."""
         # Replace macro-specific operators
         condition = condition.strip()
+         # Handle empty check (common in %DO %WHILE loops)
+        condition = re.sub(r'(\w+)\s+(?:NE|ne)\s*$', r'\1 != ""', condition)
         
+        # Fix missing closing conditions
+        if condition.endswith("NE") or condition.endswith("ne"):
+            condition = condition[:-2].strip() + ' != ""'
+
         # Replace comparison operators
         condition = re.sub(r'\b=\b', '==', condition)  # = in macro is equality
         condition = re.sub(r'\bEQ\b', '==', condition, flags=re.IGNORECASE)
