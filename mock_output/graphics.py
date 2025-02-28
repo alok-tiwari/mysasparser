@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: graphics.sas
-# Generated on: 2025-02-28 01:29:44
+# Generated on: 2025-02-28 01:37:19
 
 import pandas as pd
 import numpy as np
@@ -7,6 +7,10 @@ from scipy import stats
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# Configure plotting
+plt.style.use('seaborn')
+sns.set_theme()
 
 
 # Load required datasets
@@ -116,7 +120,7 @@ html_file = os.path.join(output_dir, 'report.html";')
 # --------------------------------------------------
 # PROC: gchart (Lines 20-20)
 # --------------------------------------------------
-# TODO: Convert PROC GCHART
+# ERROR converting PROC - gchart: 'SASPythonConverter' object has no attribute '_convert_proc_print'
 # Original code:
 # proc gchart data=sales;
 

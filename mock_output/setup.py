@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: setup.sas
-# Generated on: 2025-02-28 01:29:44
+# Generated on: 2025-02-28 01:37:18
 
 import pandas as pd
 import numpy as np
@@ -7,6 +7,10 @@ from scipy import stats
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# Configure plotting
+plt.style.use('seaborn')
+sns.set_theme()
 
 
 # Load required datasets

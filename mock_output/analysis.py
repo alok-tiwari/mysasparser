@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: analysis.sas
-# Generated on: 2025-02-28 01:29:44
+# Generated on: 2025-02-28 01:37:18
 
 import pandas as pd
 import numpy as np
@@ -7,6 +7,10 @@ from scipy import stats
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# Configure plotting
+plt.style.use('seaborn')
+sns.set_theme()
 
 
 # Load required datasets
@@ -24,20 +28,62 @@ min_obs = 1000
 
 
 # --------------------------------------------------
+# PROC: format (Lines 8-8)
+# --------------------------------------------------
+# ERROR converting PROC - format: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+# proc format;
+
+
+# --------------------------------------------------
 # MACRO: analyze_segment (Lines 23-23)
 # --------------------------------------------------
-# ERROR converting MACRO - analyze_segment: name 'var' is not defined
-# Original code:
-#  
-# %macro analyze_segment(data=, segment=, var=);
+def analyze_segment(data, segment, var):
+    """Analyze a segment of data with statistical tests and plots."""
+    # Filter data for segment
+    segment_data = data[data['segment'] == segment]
+
+    # Check if enough observations
+    if len(segment_data) < min_obs:
+        print(f"WARNING: Insufficient observations for {segment}")
+        return
+
+    # Calculate summary statistics
+    stats = segment_data[var].describe()
+    print(f"Statistics for {var} in segment {segment}:")
+    print(stats)
+
+    # Detailed analysis
+    # Normality test
+    stat, p_value = stats.normaltest(segment_data[var].dropna())
+    print(f"Normality test: stat={stat:.4f}, p-value={p_value:.4f}")
+
+    # Visualizations
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+
+    # Histogram
+    sns.histplot(data=segment_data, x=var, kde=True, ax=ax1)
+    ax1.set_title(f"Distribution of {var}")
+
+    # Box plot
+    sns.boxplot(y=segment_data[var], ax=ax2)
+    ax2.set_title("Box Plot")
+
+    # Q-Q plot
+    stats.probplot(segment_data[var].dropna(), plot=ax3)
+    ax3.set_title("Q-Q Plot")
+
+    plt.tight_layout()
+    plt.show()
 
 
 # --------------------------------------------------
 # PROC: means (Lines 25-25)
 # --------------------------------------------------
-# Calculate statistics for all numeric variables
-df_stats_df = df_df.describe()
-print(df_stats_df)
+# ERROR converting PROC - means: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+#  
+# proc means data=&data noprint;
 
 
 # --------------------------------------------------
@@ -57,7 +103,7 @@ if skip_analysis == 0:
 # --------------------------------------------------
 # PROC: univariate (Lines 48-48)
 # --------------------------------------------------
-# ERROR converting PROC - univariate: name 'shapiro_test' is not defined
+# ERROR converting PROC - univariate: 'SASPythonConverter' object has no attribute '_convert_proc_print'
 # Original code:
 # proc univariate data=&data normal plot;
 
@@ -65,42 +111,19 @@ if skip_analysis == 0:
 # --------------------------------------------------
 # PROC: ttest (Lines 57-57)
 # --------------------------------------------------
-# T-test analysis
-from scipy import stats
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-# One-sample t-test (H0: mean = 0)
-
-
-# --------------------------------------------------
-# PROC_SQL: SQL (Lines 65-65)
-# --------------------------------------------------
-# SQL operations using pandas
-# TODO: Convert complex SQL operations
-# Original SQL:  
-proc sql noprint;
+# ERROR converting PROC - ttest: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+#  
+# proc ttest data=&data h0=0 alpha=&alpha;
 
 
 # --------------------------------------------------
 # MACRO: run_analysis (Lines 73-73)
 # --------------------------------------------------
-def run_analysis():
-    """Python function converted from SAS macro run_analysis."""
-    # Get list of unique segments
-    segment_list = df['segment'].unique()
-
-    # Initialize counter
-    i = 1
-
-    # Loop through segments
-    for segment in segment_list:
-        analyze_segment(
-            data=df,
-            segment=segment,
-            var='response_time'
-        )
-        i += 1
+# ERROR converting MACRO - run_analysis
+# Original code:
+#  
+%macro run_analysis;
 
 
 # --------------------------------------------------
@@ -112,7 +135,7 @@ i = 1
 # --------------------------------------------------
 # %LET: segment (Lines 75-75)
 # --------------------------------------------------
-segment = %scan(segment_list, i)
+segment = '%scan(&segment_list, &i)'
 
 
 # --------------------------------------------------
@@ -124,13 +147,13 @@ while segment != "":
 # --------------------------------------------------
 # %LET: i (Lines 82-82)
 # --------------------------------------------------
-i = %eval(i + 1)
+i = '%eval(&i + 1)'
 
 
 # --------------------------------------------------
 # %LET: segment (Lines 83-85)
 # --------------------------------------------------
-segment = %scan(segment_list, i)
+segment = '%scan(&segment_list, &i)'
 
 
 # --------------------------------------------------

@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: sample.sas
-# Generated on: 2025-02-28 01:29:44
+# Generated on: 2025-02-28 01:37:18
 
 import pandas as pd
 import numpy as np
@@ -7,6 +7,10 @@ from scipy import stats
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# Configure plotting
+plt.style.use('seaborn')
+sns.set_theme()
 
 
 # Load required datasets
@@ -54,7 +58,7 @@ dw_schema = 'DW_SCHEMA'
 # --------------------------------------------------
 # %LET: reporting_date (Lines 9-9)
 # --------------------------------------------------
-reporting_date = %sysfunc(today())
+reporting_date = '%sysfunc(today())'
 
 
 # --------------------------------------------------
@@ -66,9 +70,9 @@ lookback_period = 12
 # --------------------------------------------------
 # MACRO: process_data (Lines 13-13)
 # --------------------------------------------------
-def process_data(input_ds=None, output_ds=None, date_var='', filter_condition=''):
+def process_data(input_ds, output_ds, date_var, filter_condition):
     """Python function converted from SAS macro process_data."""
-    pass
+    pass  # TODO: Implement macro body
 
 
 # --------------------------------------------------
@@ -87,7 +91,7 @@ if %sysfunc(exist(input_ds)) = 0:
 # --------------------------------------------------
 # %LET: error_count (Lines 20-22)
 # --------------------------------------------------
-error_count = %eval(error_count + 1)
+error_count = '%eval(&error_count + 1)'
 
 
 # --------------------------------------------------
@@ -95,14 +99,6 @@ error_count = %eval(error_count + 1)
 # --------------------------------------------------
 if error_count == 0:
     # TODO: Convert macro action: %do
-
-
-# --------------------------------------------------
-# PROC_SQL: SQL (Lines 25-25)
-# --------------------------------------------------
-# SQL operations using pandas
-# TODO: Convert complex SQL operations
-# Original SQL: proc sql noprint;
 
 
 # --------------------------------------------------
@@ -142,7 +138,7 @@ if syserr > 4:
 # --------------------------------------------------
 # %LET: error_count (Lines 58-64)
 # --------------------------------------------------
-error_count = %eval(error_count + 1)
+error_count = '%eval(&error_count + 1)'
 
 
 # --------------------------------------------------
@@ -153,55 +149,35 @@ daily_summary_df = pd.DataFrame()
 
 
 # --------------------------------------------------
-# PROC_SQL: SQL (Lines 99-99)
-# --------------------------------------------------
-# SQL operations using pandas
-# TODO: Convert complex SQL operations
-# Original SQL:  
-proc sql;
-
-
-# --------------------------------------------------
 # PROC: means (Lines 134-134)
 # --------------------------------------------------
-# Calculate statistics for all numeric variables
-STAGE_stats_df = stage_df.describe()
-print(STAGE_stats_df)
+# ERROR converting PROC - means: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+#  
+# proc means data=STAGE.sales_analysis noprint;
 
 
 # --------------------------------------------------
 # PROC: univariate (Lines 141-141)
 # --------------------------------------------------
-# Statistical analysis with visualization
-from scipy import stats
-import matplotlib.pyplot as plt
-import seaborn as sns
-# Analyze all numeric columns
-var_list = stage_df.select_dtypes(include=['number']).columns.tolist()
+# ERROR converting PROC - univariate: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+# proc univariate data=STAGE.sales_analysis;
 
-for var in var_list:
-    data = stage_df[var].dropna()
-    
-    # Basic descriptive statistics
-    desc_stats = data.describe()
-    print(f"Descriptive statistics for {var}:")
-    print(desc_stats)
-    
-    # Additional statistics
-    additional_stats = {
-        'skewness': data.skew(),
-        'kurtosis': data.kurtosis(),
-        'variance': data.var(),
-        'sum': data.sum(),
-        'IQR': data.quantile(0.75) - data.quantile(0.25)
-    }
-    print(pd.Series(additional_stats))
+
+# --------------------------------------------------
+# PROC: format (Lines 149-149)
+# --------------------------------------------------
+# ERROR converting PROC - format: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# Original code:
+#  
+# proc format;
 
 
 # --------------------------------------------------
 # %LET: rc (Lines 165-174)
 # --------------------------------------------------
-# TODO: Convert macro variable assignment
+# ERROR: Could not convert %LET statement
 #  
 %let rc = %process_data(
 input_ds=STAGE.sales_analysis,
