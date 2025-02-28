@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: graphics.sas
-# Generated on: 2025-02-28 01:37:19
+# Generated on: 2025-02-28 02:17:55
 
 import pandas as pd
 import numpy as np
@@ -14,14 +14,17 @@ sns.set_theme()
 
 
 # Load required datasets
-# Define sales dataset (create or load as appropriate)
-try:
-    sales_df = pd.DataFrame()  # Starting with empty DataFrame
-    # Alternatively, load from CSV:
-    # sales_df = pd.read_csv('sales.csv')
-except Exception as e:
-    print(f"Error setting up sales: {e}")
-    sales_df = pd.DataFrame()
+
+def load_sashelp_dataset(name: str) -> pd.DataFrame:
+    """Load a dataset from sashelp library."""
+    try:
+        return pd.read_csv(f'sashelp_{name.lower()}.csv')
+    except Exception as e:
+        print(f'Error loading sashelp.{name}: {e}')
+        return pd.DataFrame()
+
+# Initialize sales dataset
+sales_df = pd.DataFrame()
 
 # --------------------------------------------------
 # GOPTIONS:  (Lines 2-4)
@@ -36,24 +39,22 @@ except Exception as e:
 # --------------------------------------------------
 # TITLE:  (Lines 5-5)
 # --------------------------------------------------
-# Set plot title
+title_ = "Sales Analysis Report"
 plt.suptitle("Sales Analysis Report", fontsize=14)
-title_1 = "Sales Analysis Report"
 
 
 # --------------------------------------------------
 # TITLE:  (Lines 6-6)
 # --------------------------------------------------
-# Set plot title
-plt.suptitle("Year 2023", fontsize=12)
-title_2 = "Year 2023"
+title_ = "Year 2023"
+plt.suptitle("Year 2023", fontsize=14)
 
 
 # --------------------------------------------------
 # FOOTNOTE:  (Lines 7-9)
 # --------------------------------------------------
-# Add footnote to plot
-plt.figtext(0.5, 0.01, "Confidential", ha='center', fontsize=10)
+footnote_ = "Confidential"
+plt.figtext(0.5, 0.01, "Confidential", ha='center')
 
 
 # --------------------------------------------------
@@ -100,44 +101,54 @@ plt.figtext(0.5, 0.01, "Confidential", ha='center', fontsize=10)
 # --------------------------------------------------
 # ODS:  (Lines 17-17)
 # --------------------------------------------------
-# Enable Matplotlib and seaborn for graphics
+# Enable high-quality graphics
 import matplotlib.pyplot as plt
 import seaborn as sns
-plt.rcParams['figure.figsize'] = (10, 6)
-plt.rcParams['figure.dpi'] = 100
+plt.style.use('seaborn')
+plt.rcParams.update({
+    'figure.figsize': (10, 6),
+    'figure.dpi': 100,
+    'savefig.dpi': 300,
+    'font.size': 10,
+    'axes.titlesize': 12,
+    'axes.labelsize': 10,
+    'axes.grid': True
+})
+sns.set_theme(style='whitegrid')
 
 
 # --------------------------------------------------
 # ODS:  (Lines 18-19)
 # --------------------------------------------------
-# Setup output directory for HTML reports
+# Setup HTML output
 import os
 output_dir = './output'
 os.makedirs(output_dir, exist_ok=True)
-html_file = os.path.join(output_dir, 'report.html";')
+html_file = os.path.join(output_dir, 'report.html')
+html_content = []
 
 
 # --------------------------------------------------
 # PROC: gchart (Lines 20-20)
 # --------------------------------------------------
-# ERROR converting PROC - gchart: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# TODO: Convert PROC GCHART
 # Original code:
-# proc gchart data=sales;
+proc gchart data=sales;
 
 
 # --------------------------------------------------
 # ODS:  (Lines 27-27)
 # --------------------------------------------------
-# Complete HTML output
-# If using a library like pandas HTML output:
-# with open(html_file, 'w') as f:
-#     f.write(html_content)
+# Close HTML output
+if 'html_file' in locals():
+    with open(html_file, 'w') as f:
+        f.write(html_content)
 
 
 # --------------------------------------------------
 # ODS:  (Lines 28-28)
 # --------------------------------------------------
-# Close all open plots
+# Close all plots
 plt.close('all')
 
 

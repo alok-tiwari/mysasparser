@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: sample.sas
-# Generated on: 2025-02-28 01:37:18
+# Generated on: 2025-02-28 02:17:55
 
 import pandas as pd
 import numpy as np
@@ -14,45 +14,78 @@ sns.set_theme()
 
 
 # Load required datasets
+
+def load_sashelp_dataset(name: str) -> pd.DataFrame:
+    """Load a dataset from sashelp library."""
+    try:
+        return pd.read_csv(f'sashelp_{name.lower()}.csv')
+    except Exception as e:
+        print(f'Error loading sashelp.{name}: {e}')
+        return pd.DataFrame()
+
+# Load STAGE.daily_summary
+try:
+    daily_summary_df = pd.read_csv(os.path.join('/path/to/stage" compress=yes', 'daily_summary.csv'))
+except Exception as e:
+    print(f'Error loading STAGE.daily_summary: {e}')
+    daily_summary_df = pd.DataFrame()
+
 # Load STAGE.sales_analysis
 try:
-    sales_analysis_df = pd.read_csv(os.path.join("/path/to/stage" compress=yes, 'sales_analysis.csv'))
+    sales_analysis_df = pd.read_csv(os.path.join('/path/to/stage" compress=yes', 'sales_analysis.csv'))
 except Exception as e:
-    print(f"Error loading STAGE.sales_analysis: {e}")
+    print(f'Error loading STAGE.sales_analysis: {e}')
     sales_analysis_df = pd.DataFrame()
 
 # --------------------------------------------------
 # LIBNAME: RAW (Lines 4-4)
 # --------------------------------------------------
 # Define RAW library path
-raw_path = "/path/to/raw" access=readonly
-# For use with pandas:
-# df = pd.read_csv(f'{raw_path}/dataset.csv')
-# Note: Read-only access specified
+raw_path = '/path/to/raw" access=readonly'
+os.makedirs(raw_path, exist_ok=True)
+
+def read_raw_dataset(name: str) -> pd.DataFrame:
+    """Read dataset from RAW library."""
+    try:
+        path = os.path.join(raw_path, f'{name}.csv')
+        return pd.read_csv(path)
+    except Exception as e:
+        print(f'Error reading {name}: {e}')
+        return pd.DataFrame()
 
 
 # --------------------------------------------------
 # LIBNAME: STAGE (Lines 5-5)
 # --------------------------------------------------
 # Define STAGE library path
-stage_path = "/path/to/stage" compress=yes
-# For use with pandas:
-# df = pd.read_csv(f'{stage_path}/dataset.csv')
-# Note: Data compression specified
+stage_path = '/path/to/stage" compress=yes'
+os.makedirs(stage_path, exist_ok=True)
+
+def read_stage_dataset(name: str) -> pd.DataFrame:
+    """Read dataset from STAGE library."""
+    try:
+        path = os.path.join(stage_path, f'{name}.csv')
+        return pd.read_csv(path)
+    except Exception as e:
+        print(f'Error reading {name}: {e}')
+        return pd.DataFrame()
 
 
 # --------------------------------------------------
 # LIBNAME: DW (Lines 6-8)
 # --------------------------------------------------
 # Define DW library path
-# Import database libraries
-import sqlalchemy as sa
+dw_path = 'oracle path="@production" schema=DW_SCHEMA'
+os.makedirs(dw_path, exist_ok=True)
 
-# Create Oracle connection string
-dw_conn = sa.create_engine('oracle://@production')
-dw_schema = 'DW_SCHEMA'
-# For use with pandas:
-# df = pd.read_sql('SELECT * FROM table', dw_conn)
+def read_dw_dataset(name: str) -> pd.DataFrame:
+    """Read dataset from DW library."""
+    try:
+        path = os.path.join(dw_path, f'{name}.csv')
+        return pd.read_csv(path)
+    except Exception as e:
+        print(f'Error reading {name}: {e}')
+        return pd.DataFrame()
 
 
 # --------------------------------------------------
@@ -71,8 +104,15 @@ lookback_period = 12
 # MACRO: process_data (Lines 13-13)
 # --------------------------------------------------
 def process_data(input_ds, output_ds, date_var, filter_condition):
-    """Python function converted from SAS macro process_data."""
-    pass  # TODO: Implement macro body
+    """Python function converted from SAS macro process_data.
+    Args:
+        input_ds: Parameter description
+        output_ds: Parameter description
+        date_var: Parameter description
+        filter_condition: Parameter description
+    """
+    # TODO: Implement macro logic
+    pass
 
 
 # --------------------------------------------------
@@ -102,30 +142,28 @@ if error_count == 0:
 
 
 # --------------------------------------------------
-# DATA: &output_ds (Lines 35-35)
-# --------------------------------------------------
-# Create a new DataFrame
-output_ds_df = pd.DataFrame()
-
-
-# --------------------------------------------------
 # FORMAT:  (Lines 51-51)
 # --------------------------------------------------
-# Define formatter functions for data display
-# Format 8 with 2 precision
-def format_8(value):
-    return f'{value:2}'
+# Apply format to 8
+if '2' in globals():
+    8_formatted = 8_df['8'].apply(apply_2_format)
+else:
+    8_formatted = 8_df['8'].astype(str)
+# Apply format to $1
+if '' in globals():
+    $1_formatted = $1_df['$1'].apply(apply__format)
+else:
+    $1_formatted = $1_df['$1'].astype(str)
 
 
 # --------------------------------------------------
 # INFORMAT:  (Lines 52-53)
 # --------------------------------------------------
-# Define parser functions for data import
-# Apply formatting to variables
-def apply_formats(df):
-    """Apply SAS-like formats to DataFrame columns"""
-    formatted_df = df.copy()
-    return formatted_df
+# Apply format to best32
+if '' in globals():
+    best32_formatted = best32_df['best32'].apply(apply__format)
+else:
+    best32_formatted = best32_df['best32'].astype(str)
 
 
 # --------------------------------------------------
@@ -142,42 +180,32 @@ error_count = '%eval(&error_count + 1)'
 
 
 # --------------------------------------------------
-# DATA: STAGE.daily_summary (Lines 67-67)
-# --------------------------------------------------
-# Create a new DataFrame
-daily_summary_df = pd.DataFrame()
-
-
-# --------------------------------------------------
 # PROC: means (Lines 134-134)
 # --------------------------------------------------
-# ERROR converting PROC - means: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# ERROR converting PROC - MEANS: name 'stats' is not defined
 # Original code:
-#  
-# proc means data=STAGE.sales_analysis noprint;
+ 
+proc means data=STAGE.sales_analysis noprint;
 
 
 # --------------------------------------------------
 # PROC: univariate (Lines 141-141)
 # --------------------------------------------------
-# ERROR converting PROC - univariate: 'SASPythonConverter' object has no attribute '_convert_proc_print'
-# Original code:
-# proc univariate data=STAGE.sales_analysis;
+# Calculate detailed statistics
+from scipy import stats
 
-
-# --------------------------------------------------
-# PROC: format (Lines 149-149)
-# --------------------------------------------------
-# ERROR converting PROC - format: 'SASPythonConverter' object has no attribute '_convert_proc_print'
-# Original code:
-#  
-# proc format;
+# Analyze all numeric columns
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+for col in numeric_cols:
+    print(f'\nAnalysis for {col}:')
+    data = df[col].dropna()
+    print(data.describe())
 
 
 # --------------------------------------------------
 # %LET: rc (Lines 165-174)
 # --------------------------------------------------
-# ERROR: Could not convert %LET statement
+# ERROR: Could not convert macro variable
 #  
 %let rc = %process_data(
 input_ds=STAGE.sales_analysis,

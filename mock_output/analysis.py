@@ -1,5 +1,5 @@
 # Auto-generated Python code from SAS file: analysis.sas
-# Generated on: 2025-02-28 01:37:18
+# Generated on: 2025-02-28 02:17:55
 
 import pandas as pd
 import numpy as np
@@ -15,6 +15,26 @@ sns.set_theme()
 
 # Load required datasets
 
+def load_sashelp_dataset(name: str) -> pd.DataFrame:
+    """Load a dataset from sashelp library."""
+    try:
+        return pd.read_csv(f'sashelp_{name.lower()}.csv')
+    except Exception as e:
+        print(f'Error loading sashelp.{name}: {e}')
+        return pd.DataFrame()
+
+# Initialize _null_ dataset
+_null__df = pd.DataFrame()
+
+# Initialize h0 dataset
+h0_df = pd.DataFrame()
+
+# Initialize noprint dataset
+noprint_df = pd.DataFrame()
+
+# Initialize normal dataset
+normal_df = pd.DataFrame()
+
 # --------------------------------------------------
 # %LET: alpha (Lines 4-4)
 # --------------------------------------------------
@@ -25,14 +45,6 @@ alpha = 0.05
 # %LET: min_obs (Lines 5-7)
 # --------------------------------------------------
 min_obs = 1000
-
-
-# --------------------------------------------------
-# PROC: format (Lines 8-8)
-# --------------------------------------------------
-# ERROR converting PROC - format: 'SASPythonConverter' object has no attribute '_convert_proc_print'
-# Original code:
-# proc format;
 
 
 # --------------------------------------------------
@@ -80,17 +92,10 @@ def analyze_segment(data, segment, var):
 # --------------------------------------------------
 # PROC: means (Lines 25-25)
 # --------------------------------------------------
-# ERROR converting PROC - means: 'SASPythonConverter' object has no attribute '_convert_proc_print'
+# ERROR converting PROC - MEANS: name 'stats' is not defined
 # Original code:
-#  
-# proc means data=&data noprint;
-
-
-# --------------------------------------------------
-# DATA: _null_ (Lines 37-37)
-# --------------------------------------------------
-# Create a new DataFrame
-_null__df = pd.DataFrame()
+ 
+proc means data=&data noprint;
 
 
 # --------------------------------------------------
@@ -103,18 +108,26 @@ if skip_analysis == 0:
 # --------------------------------------------------
 # PROC: univariate (Lines 48-48)
 # --------------------------------------------------
-# ERROR converting PROC - univariate: 'SASPythonConverter' object has no attribute '_convert_proc_print'
-# Original code:
-# proc univariate data=&data normal plot;
+# Calculate detailed statistics
+from scipy import stats
+
+# Analyze all numeric columns
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+for col in numeric_cols:
+    print(f'\nAnalysis for {col}:')
+    data = df[col].dropna()
+    print(data.describe())
 
 
 # --------------------------------------------------
 # PROC: ttest (Lines 57-57)
 # --------------------------------------------------
-# ERROR converting PROC - ttest: 'SASPythonConverter' object has no attribute '_convert_proc_print'
-# Original code:
-#  
-# proc ttest data=&data h0=0 alpha=&alpha;
+# T-test analysis
+from scipy import stats
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+# One-sample t-test (H0: mean = 0)
 
 
 # --------------------------------------------------
@@ -159,37 +172,45 @@ segment = '%scan(&segment_list, &i)'
 # --------------------------------------------------
 # ODS:  (Lines 91-91)
 # --------------------------------------------------
-# Enable Matplotlib and seaborn for graphics
+# Enable high-quality graphics
 import matplotlib.pyplot as plt
 import seaborn as sns
-plt.rcParams['figure.figsize'] = (10, 6)
-plt.rcParams['figure.dpi'] = 100
+plt.style.use('seaborn')
+plt.rcParams.update({
+    'figure.figsize': (10, 6),
+    'figure.dpi': 100,
+    'savefig.dpi': 300,
+    'font.size': 10,
+    'axes.titlesize': 12,
+    'axes.labelsize': 10,
+    'axes.grid': True
+})
+sns.set_theme(style='whitegrid')
 
 
 # --------------------------------------------------
 # ODS:  (Lines 92-95)
 # --------------------------------------------------
-# Setup output directory for HTML reports
+# Setup HTML output
 import os
 output_dir = './output'
 os.makedirs(output_dir, exist_ok=True)
 html_file = os.path.join(output_dir, 'analysis_report.html')
+html_content = []
 
 
 # --------------------------------------------------
 # TITLE:  (Lines 96-96)
 # --------------------------------------------------
-# Set plot title
+title_ = "Statistical Analysis Report"
 plt.suptitle("Statistical Analysis Report", fontsize=14)
-title_1 = "Statistical Analysis Report"
 
 
 # --------------------------------------------------
 # TITLE:  (Lines 97-98)
 # --------------------------------------------------
-# Set plot title
-plt.suptitle("By Segment", fontsize=12)
-title_2 = "By Segment"
+title_ = "By Segment"
+plt.suptitle("By Segment", fontsize=14)
 
 
 # --------------------------------------------------
@@ -203,16 +224,16 @@ title_2 = "By Segment"
 # --------------------------------------------------
 # ODS:  (Lines 109-109)
 # --------------------------------------------------
-# Complete HTML output
-# If using a library like pandas HTML output:
-# with open(html_file, 'w') as f:
-#     f.write(html_content)
+# Close HTML output
+if 'html_file' in locals():
+    with open(html_file, 'w') as f:
+        f.write(html_content)
 
 
 # --------------------------------------------------
 # ODS:  (Lines 110-110)
 # --------------------------------------------------
-# Close all open plots
+# Close all plots
 plt.close('all')
 
 

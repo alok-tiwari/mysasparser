@@ -146,63 +146,67 @@ class SASPythonConverter:
     
     def _add_dataset_loading(self, sas_components: List[SASComponent]) -> List[str]:
         """Generate code to load datasets referenced in SAS components."""
-        # Find all referenced datasets
         dataset_refs = set()
         libref_defs = {}
         
+        # First pass: collect LIBNAME definitions
         for comp in sas_components:
-            # Extract LIBNAME definitions
             if comp.type == "LIBNAME":
                 lib_match = re.search(r'LIBNAME\s+(\w+)\s+([^;]+)', comp.content, re.IGNORECASE)
                 if lib_match:
                     libref = lib_match.group(1)
-                    path = lib_match.group(2).strip()
+                    path = lib_match.group(2).strip().strip("'\"")
                     libref_defs[libref] = path
-            
-            # Extract dataset references
+        
+        # Second pass: collect dataset references
+        for comp in sas_components:
             if comp.type in ["DATA", "PROC", "PROC_SQL"]:
-                # Find datasets in DATA= parameters
-                data_matches = re.findall(r'DATA\s*=\s*(\w+\.?\w*)', comp.content, re.IGNORECASE)
-                dataset_refs.update(data_matches)
-                
-                # Find datasets in SET statements
-                set_matches = re.findall(r'SET\s+(\w+\.?\w*)', comp.content, re.IGNORECASE)
-                dataset_refs.update(set_matches)
-                
-                # Find datasets in FROM clauses (SQL)
-                from_matches = re.findall(r'FROM\s+(\w+\.?\w*)', comp.content, re.IGNORECASE)
-                dataset_refs.update(from_matches)
+                # Find all dataset references
+                refs = re.findall(r'(?:data|set|from|table)\s*=?\s*(\w+\.?\w*)', 
+                                comp.content, 
+                                re.IGNORECASE)
+                dataset_refs.update(refs)
         
-        # Generate code to load datasets
-        code_lines = []
-        code_lines.append("\n# Load required datasets")
+        code_lines = ["\n# Load required datasets"]
         
-        for dataset in dataset_refs:
+        # Add sashelp loading function
+        code_lines.extend([
+            "",
+            "def load_sashelp_dataset(name: str) -> pd.DataFrame:",
+            "    \"\"\"Load a dataset from sashelp library.\"\"\"",
+            "    try:",
+            "        return pd.read_csv(f'sashelp_{name.lower()}.csv')",
+            "    except Exception as e:",
+            "        print(f'Error loading sashelp.{name}: {e}')",
+            "        return pd.DataFrame()"
+        ])
+        
+        # Generate loading code for each dataset
+        for dataset in sorted(dataset_refs):
             if '.' in dataset:
-                # Handle library.dataset references
-                libref, ds_name = dataset.split('.')
-                if libref in libref_defs:
-                    code_lines.append(f"# Load {dataset}")
-                    code_lines.append(f"try:")
-                    if "'" in libref_defs[libref] or '"' in libref_defs[libref]:
-                        # Path-based library
-                        code_lines.append(f"    {ds_name.lower()}_df = pd.read_csv(os.path.join({libref_defs[libref]}, '{ds_name}.csv'))")
-                    else:
-                        # Could be database - add more specific handling as needed
-                        code_lines.append(f"    {ds_name.lower()}_df = pd.read_csv('{ds_name}.csv')  # Adjust path as needed")
-                    code_lines.append(f"except Exception as e:")
-                    code_lines.append(f"    print(f\"Error loading {dataset}: {{e}}\")")
-                    code_lines.append(f"    {ds_name.lower()}_df = pd.DataFrame()")
+                lib, name = dataset.split('.')
+                if lib.lower() == 'sashelp':
+                    code_lines.extend([
+                        "",
+                        f"# Load {dataset}",
+                        f"{name.lower()}_df = load_sashelp_dataset('{name}')"
+                    ])
+                elif lib in libref_defs:
+                    code_lines.extend([
+                        "",
+                        f"# Load {dataset}",
+                        f"try:",
+                        f"    {name.lower()}_df = pd.read_csv(os.path.join({repr(libref_defs[lib])}, '{name}.csv'))",
+                        f"except Exception as e:",
+                        f"    print(f'Error loading {dataset}: {{e}}')",
+                        f"    {name.lower()}_df = pd.DataFrame()"
+                    ])
             else:
-                # Handle work or implicit WORK datasets
-                code_lines.append(f"# Define {dataset} dataset (create or load as appropriate)")
-                code_lines.append(f"try:")
-                code_lines.append(f"    {dataset.lower()}_df = pd.DataFrame()  # Starting with empty DataFrame")
-                code_lines.append(f"    # Alternatively, load from CSV:")
-                code_lines.append(f"    # {dataset.lower()}_df = pd.read_csv('{dataset.lower()}.csv')")
-                code_lines.append(f"except Exception as e:")
-                code_lines.append(f"    print(f\"Error setting up {dataset}: {{e}}\")")
-                code_lines.append(f"    {dataset.lower()}_df = pd.DataFrame()")
+                code_lines.extend([
+                    "",
+                    f"# Initialize {dataset} dataset",
+                    f"{dataset.lower()}_df = pd.DataFrame()"
+                ])
         
         return code_lines
 
@@ -393,156 +397,168 @@ class SASPythonConverter:
             'SORT': self._convert_proc_sort,
             'PRINT': self._convert_proc_print,
             'FORMAT': self._convert_proc_format,
-            'REPORT': self._convert_proc_report
+            'REPORT': self._convert_proc_report,
+            'SGPLOT': self._convert_proc_sgplot
         }
         
+        # Check if we have a converter method for this PROC
         if proc_type in proc_converters:
             try:
-                return proc_converters[proc_type](component)
+                if hasattr(self, proc_converters[proc_type].__name__):
+                    return proc_converters[proc_type](component)
+                else:
+                    return f"# TODO: Implement {proc_converters[proc_type].__name__}\n# Original code:\n{component.content}"
             except Exception as e:
                 return f"# ERROR converting PROC - {proc_type}: {str(e)}\n# Original code:\n{component.content}"
         else:
             return f"# TODO: Convert PROC {proc_type}\n# Original code:\n{component.content}"
 
     def _convert_proc_sort(self, component: SASComponent) -> str:
-        """Convert PROC SORT to pandas sort_values()."""
-        # Extract data parameter
+        """Convert PROC SORT to pandas sort_values() and drop_duplicates()."""
         data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
         out_match = re.search(r'out\s*=\s*(\w+)', component.content, re.IGNORECASE)
         by_match = re.search(r'by\s+(.*?);', component.content, re.IGNORECASE)
+        nodupkey = 'nodupkey' in component.content.lower()
+        nodup = 'nodup' in component.content.lower()
         
         if data_match and by_match:
             data_name = self._convert_dataset_name(data_match.group(1))
+            out_name = self._convert_dataset_name(out_match.group(1)) if out_match else data_name
             by_vars = [v.strip() for v in by_match.group(1).split()]
             
-            # Check for sorting options
-            descending = []
-            for i, var in enumerate(by_vars):
-                if var.upper() == "DESCENDING":
-                    descending.append(by_vars[i+1])
-                    
-            # Remove DESCENDING keyword from variables
-            by_vars = [v for v in by_vars if v.upper() != "DESCENDING"]
+            code_lines = []
+            code_lines.append(f"# Sort dataset by {', '.join(by_vars)}")
             
-            # Build ascending parameter
-            ascending_list = ["False" if v in descending else "True" for v in by_vars]
-            
-            # Format the by variables for Python
-            by_vars_str = "[" + ", ".join([f"'{v}'" for v in by_vars]) + "]"
-            ascending_str = "[" + ", ".join(ascending_list) + "]"
-            
-            # Determine output dataset
-            if out_match:
-                out_name = self._convert_dataset_name(out_match.group(1))
+            if nodupkey:
+                code_lines.extend([
+                    f"{out_name} = {data_name}.sort_values([{', '.join(f''''{v}' ''' for v in by_vars)}])",
+                    f"{out_name} = {out_name}.drop_duplicates(subset=[{', '.join(f''''{v}' ''' for v in by_vars)}], keep='first')"
+                ])
+            elif nodup:
+                code_lines.extend([
+                    f"{out_name} = {data_name}.sort_values([{', '.join(f''''{v}' ''' for v in by_vars)}])",
+                    f"{out_name} = {out_name}.drop_duplicates(keep='first')"
+                ])
             else:
-                out_name = data_name
-                
-            # Generate code
-            code = [
-                f"# Sort data by {', '.join(by_vars)}",
-                f"{out_name} = {data_name}.sort_values(by={by_vars_str}, ascending={ascending_str}, ignore_index=True)"
-            ]
+                code_lines.append(f"{out_name} = {data_name}.sort_values([{', '.join(f''''{v}' ''' for v in by_vars)}])")
             
-            return "\n".join(code)
-        else:
-            return f"# TODO: Convert PROC SORT (missing required parameters)\n# " + component.content.replace("\n", "\n# ")
+            return "\n".join(code_lines)
+        
+        return f"# TODO: Convert complex PROC SORT\n# {component.content}"
 
     def _convert_proc_means(self, component: SASComponent) -> str:
-        """Convert PROC MEANS to pandas with enhanced output."""
-        content = component.content
+        """Convert PROC MEANS to pandas descriptive statistics."""
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
+        by_match = re.search(r'by\s+(.*?);', component.content, re.IGNORECASE)
+        maxdec_match = re.search(r'maxdec\s*=\s*(\d+)', component.content, re.IGNORECASE)
+        nway = 'nway' in component.content.lower()
+        
+        dataset = data_match.group(1) if data_match else "df"
+        dataset = dataset.replace('&', '')
+        variables = var_match.group(1).split() if var_match else []
+        by_vars = by_match.group(1).split() if by_match else []
+        maxdec = int(maxdec_match.group(1)) if maxdec_match else 4
+        
         code_lines = []
+        code_lines.append("# Calculate descriptive statistics")
         
-        # Extract data parameter
-        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
-        data_name = data_match.group(1) if data_match else "df"
-        data_df = f"{data_name.lower()}_df"
+        # Format string for numeric output
+        format_str = f":.{maxdec}f"
+        code_lines.append(f"pd.set_option('display.float_format', lambda x: '{{0:{format_str}}}'.format(x))")
         
-        # Extract variables
-        var_match = re.search(r'VAR\s+(.*?);', content, re.IGNORECASE)
-        var_list = []
-        if var_match:
-            var_list = [v.strip() for v in var_match.group(1).split()]
-            var_list_str = "[" + ", ".join([f"'{v}'" for v in var_list]) + "]"
-            code_lines.append(f"# Calculate statistics for specific variables")
-            code_lines.append(f"{data_name}_stats_df = {data_df}[{var_list_str}].describe()")
+        # Handle NWAY option
+        if nway and by_vars:
+            code_lines.append("# NWAY option: only show statistics for each BY group combination")
+            code_lines.append(f"stats_df = {dataset}_df.groupby([{', '.join(f''''{v}' ''' for v in by_vars)}], dropna=False)")
         else:
-            code_lines.append(f"# Calculate statistics for all numeric variables")
-            code_lines.append(f"{data_name}_stats_df = {data_df}.describe()")
-        
-        # Extract BY variables (for groupby)
-        by_match = re.search(r'BY\s+(.*?);', content, re.IGNORECASE)
-        if by_match:
-            by_vars = [v.strip() for v in by_match.group(1).split()]
-            by_vars_str = "[" + ", ".join([f"'{v}'" for v in by_vars]) + "]"
-            code_lines.append(f"# Group by {', '.join(by_vars)}")
-            
-            if var_list:
-                code_lines.append(f"grouped_stats = {data_df}.groupby({by_vars_str})[{var_list_str}].describe()")
+            if by_vars:
+                if variables:
+                    var_list = ", ".join(f"'{v}'" for v in variables)
+                    code_lines.append(f"stats_df = {dataset}_df.groupby([{', '.join(f''''{v}' ''' for v in by_vars)}])[{var_list}].agg({stats})")
+                else:
+                    code_lines.append(f"stats_df = {dataset}_df.groupby([{', '.join(f''''{v}' ''' for v in by_vars)}]).agg({stats})")
             else:
-                code_lines.append(f"grouped_stats = {data_df}.groupby({by_vars_str}).describe()")
-            
-            code_lines.append(f"{data_name}_stats_df = grouped_stats.reset_index()")
+                if variables:
+                    var_list = ", ".join(f"'{v}'" for v in variables)
+                    code_lines.append(f"stats_df = {dataset}_df[[{var_list}]].agg({stats})")
+                else:
+                    code_lines.append(f"stats_df = {dataset}_df.agg({stats})")
         
-        # Extract OUTPUT statement
-        output_match = re.search(r'OUTPUT\s+OUT\s*=\s*(\w+)\s*(.*?);', content, re.IGNORECASE | re.DOTALL)
+        # Reset index if using groupby
+        if by_vars:
+            code_lines.append("stats_df = stats_df.reset_index()")
+        
+        # Add output if specified
+        output_match = re.search(r'output\s+out\s*=\s*(\w+)\s*(.*?);', component.content, re.IGNORECASE)
         if output_match:
-            out_name = output_match.group(1)
-            out_options = output_match.group(2) if output_match.group(2) else ""
-            
-            # Parse statistics requested
-            stat_dict = {}
-            stat_matches = re.findall(r'(\w+)\s*=\s*(\w+)', out_options)
-            
-            if stat_matches:
-                code_lines.append(f"# Create custom output dataset")
-                code_lines.append(f"{out_name.lower()}_df = pd.DataFrame()")
-                
-                # Map SAS stats to pandas
-                for stat_name, var_name in stat_matches:
-                    sas_to_pandas = {
-                        'MEAN': 'mean',
-                        'STD': 'std',
-                        'MIN': 'min',
-                        'MAX': 'max',
-                        'N': 'count',
-                        'SUM': 'sum',
-                        'VAR': 'var',
-                        'MEDIAN': 'median'
-                    }
-                    
-                    pd_stat = sas_to_pandas.get(stat_name.upper(), stat_name.lower())
-                    
-                    if by_match:
-                        code_lines.append(f"{out_name.lower()}_df['{var_name}'] = {data_df}.groupby({by_vars_str})['{var_list[0]}' if var_list else 'id'].{pd_stat}()")
-                    else:
-                        code_lines.append(f"{out_name.lower()}_df['{var_name}'] = [{data_df}['{var_list[0]}' if var_list else 'id'].{pd_stat}()]")
+            out_dataset = output_match.group(1)
+            code_lines.extend([
+                "",
+                "# Save statistics to new DataFrame",
+                f"{out_dataset}_df = stats_df.copy()"
+            ])
         
-        # Display results
-        code_lines.append(f"print({data_name}_stats_df)")
+        # Print results unless noprint specified
+        if not 'noprint' in component.content.lower():
+            code_lines.extend([
+                "print('\\nDescriptive Statistics:')",
+                "print(stats_df)"
+            ])
         
         return "\n".join(code_lines)
 
     def _convert_proc_univariate(self, component: SASComponent) -> str:
-        """Convert PROC UNIVARIATE to Python statistical analysis."""
+        """Convert PROC UNIVARIATE to detailed pandas/scipy statistics."""
+        # Extract dataset and variables
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
+        
+        dataset = data_match.group(1) if data_match else "df"
+        dataset = dataset.replace('&', '')  # Handle macro variables
+        variables = var_match.group(1).split() if var_match else []
+        
         code_lines = [
-            "# Statistical analysis using scipy and numpy",
+            "# Calculate detailed statistics",
             "from scipy import stats",
-            "import numpy as np",
-            "",
-            "# Extract parameters",
+            ""
         ]
         
-        # Add normality test
-        code_lines.extend([
-            "# Perform normality test",
-            "stat, p_value = stats.normaltest(data)",
-            "print(f'Normality test: statistic={stat:.3f}, p-value={p_value:.3f}')",
-            "",
-            "# Generate descriptive statistics",
-            "desc_stats = data.describe()",
-            "print('\\nDescriptive Statistics:')",
-            "print(desc_stats)"
-        ])
+        if variables:
+            for var in variables:
+                code_lines.extend([
+                    f"print(f'\\nDetailed Analysis for {var}:')",
+                    f"data = {dataset}_df['{var}'].dropna()",
+                    "",
+                    "# Basic statistics",
+                    "desc = data.describe()",
+                    "print('\\nBasic Statistics:')",
+                    "print(desc)",
+                    "",
+                    "# Additional statistics",
+                    "print('\\nAdditional Statistics:')",
+                    "print(f'Skewness: {stats.skew(data):.3f}')",
+                    "print(f'Kurtosis: {stats.kurtosis(data):.3f}')",
+                    "",
+                    "# Normality test",
+                    "stat, p_value = stats.normaltest(data)",
+                    "print(f'Normality test: statistic={stat:.3f}, p-value={p_value:.3f}')",
+                    "",
+                    "# Generate QQ plot",
+                    "fig, ax = plt.subplots(figsize=(8, 6))",
+                    f"stats.probplot(data, dist='norm', plot=ax)",
+                    f"ax.set_title(f'Q-Q Plot of {var}')",
+                    "plt.show()"
+                ])
+        else:
+            code_lines.extend([
+                "# Analyze all numeric columns",
+                "numeric_cols = df.select_dtypes(include=[np.number]).columns",
+                "for col in numeric_cols:",
+                "    print(f'\\nAnalysis for {col}:')",
+                "    data = df[col].dropna()",
+                "    print(data.describe())"
+            ])
         
         return "\n".join(code_lines)
 
@@ -872,582 +888,321 @@ class SASPythonConverter:
         return "\n".join(code_lines)
 
     def _convert_proc_freq(self, component: SASComponent) -> str:
-        """Convert PROC FREQ to pandas crosstab and chi-square tests."""
-        content = component.content
+        """Convert PROC FREQ to pandas crosstab/value_counts with chi-square test."""
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        tables_match = re.search(r'tables\s+(.*?);', component.content, re.IGNORECASE)
+        chisq_option = 'chisq' in component.content.lower()
+        
+        dataset = data_match.group(1) if data_match else "df"
+        dataset = dataset.replace('&', '')
+        
         code_lines = []
+        code_lines.append("# Calculate frequency distributions")
         
-        # Import required libraries
-        code_lines.extend([
-            "# Frequency analysis",
-            "import pandas as pd",
-            "import numpy as np",
-            "from scipy import stats",
-            "import matplotlib.pyplot as plt",
-            "import seaborn as sns"
-        ])
-        
-        # Extract data parameter
-        data_match = re.search(r'data\s*=\s*(\w+)', content, re.IGNORECASE)
-        data_name = data_match.group(1) if data_match else "df"
-        data_df = f"{data_name.lower()}_df"
-        
-        # Extract TABLE statement(s)
-        table_matches = re.findall(r'TABLES\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
-        
-        if table_matches:
-            for i, table_stmt in enumerate(table_matches):
-                # Parse TABLE statement variables (e.g., "var1 * var2")
-                table_vars = table_stmt.split('*')
-                table_vars = [v.strip() for v in table_vars]
-                
-                # Check for options like / CHISQ
-                chisq_option = re.search(r'/.*?\bCHISQ\b', table_stmt, re.IGNORECASE) is not None
-                plot_option = re.search(r'/.*?\bPLOTS?\b', table_stmt, re.IGNORECASE) is not None
-                
-                if len(table_vars) == 1:
-                    # One-way frequency table
-                    var = table_vars[0]
-                    code_lines.append(f"# One-way frequency table for {var}")
-                    code_lines.append(f"freq_table = {data_df}['{var}'].value_counts().reset_index()")
-                    code_lines.append(f"freq_table.columns = ['{var}', 'Frequency']")
-                    code_lines.append(f"freq_table['Percent'] = 100 * freq_table['Frequency'] / freq_table['Frequency'].sum()")
-                    code_lines.append(f"freq_table['Cumulative Frequency'] = freq_table['Frequency'].cumsum()")
-                    code_lines.append(f"freq_table['Cumulative Percent'] = freq_table['Percent'].cumsum()")
-                    code_lines.append(f"print(f\"\\nFrequency table for {var}:\")")
-                    code_lines.append(f"print(freq_table)")
-                    
-                    if plot_option:
-                        code_lines.append(f"")
-                        code_lines.append(f"# Visualize frequency distribution")
-                        code_lines.append(f"plt.figure(figsize=(12, 5))")
-                        code_lines.append(f"plt.subplot(1, 2, 1)")
-                        code_lines.append(f"sns.countplot(y='{var}', data={data_df}, order=freq_table['{var}'])")
-                        code_lines.append(f"plt.title(f\"Frequency of {var}\")")
-                        code_lines.append(f"plt.xlabel('Count')")
-                        
-                        code_lines.append(f"plt.subplot(1, 2, 2)")
-                        code_lines.append(f"plt.pie(freq_table['Frequency'], labels=freq_table['{var}'], autopct='%1.1f%%')")
-                        code_lines.append(f"plt.axis('equal')")
-                        code_lines.append(f"plt.title(f\"Percentage of {var}\")")
-                        
-                        code_lines.append(f"plt.tight_layout()")
-                        code_lines.append(f"plt.show()")
-                
-                elif len(table_vars) == 2:
-                    # Two-way cross-tabulation
-                    var1, var2 = table_vars
-                    code_lines.append(f"# Two-way crosstabulation for {var1} × {var2}")
-                    code_lines.append(f"crosstab = pd.crosstab(")
-                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
-                    code_lines.append(f"    margins=True, margins_name='Total'")
-                    code_lines.append(f")")
-                    code_lines.append(f"print(f\"\\nCrosstabulation of {var1} × {var2}:\")")
-                    code_lines.append(f"print(crosstab)")
-                    
-                    # Calculate percentages
-                    code_lines.append(f"")
-                    code_lines.append(f"# Row percentages")
-                    code_lines.append(f"row_pct = pd.crosstab(")
-                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
-                    code_lines.append(f"    normalize='index', margins=True, margins_name='Total'")
-                    code_lines.append(f") * 100")
-                    code_lines.append(f"print(f\"\\nRow percentages:\")")
-                    code_lines.append(f"print(row_pct)")
-                    
-                    code_lines.append(f"")
-                    code_lines.append(f"# Column percentages")
-                    code_lines.append(f"col_pct = pd.crosstab(")
-                    code_lines.append(f"    {data_df}['{var1}'], {data_df}['{var2}'],")
-                    code_lines.append(f"    normalize='columns', margins=True, margins_name='Total'")
-                    code_lines.append(f") * 100")
-                    code_lines.append(f"print(f\"\\nColumn percentages:\")")
-                    code_lines.append(f"print(col_pct)")
+        if tables_match:
+            tables = tables_match.group(1).split()
+            for table_spec in tables:
+                if '*' in table_spec:
+                    vars = table_spec.split('*')
+                    code_lines.extend([
+                        f"# Cross-tabulation of {' by '.join(vars)}",
+                        f"ctab = pd.crosstab({dataset}_df['{vars[0]}'], {dataset}_df['{vars[1]}'])",
+                        "print('\\nCross-tabulation:')",
+                        "print(ctab)",
+                        "",
+                        "# Add row and column percentages",
+                        "print('\\nRow Percentages:')",
+                        "print(pd.crosstab(data[vars[0]], data[vars[1]], normalize='index') * 100)",
+                        "print('\\nColumn Percentages:')",
+                        "print(pd.crosstab(data[vars[0]], data[vars[1]], normalize='columns') * 100)"
+                    ])
                     
                     if chisq_option:
-                        code_lines.append(f"")
-                        code_lines.append(f"# Chi-square test of independence")
-                        code_lines.append(f"# Remove the 'Total' row and column for the chi-square test")
-                        code_lines.append(f"observed = crosstab.iloc[:-1, :-1]")
-                        code_lines.append(f"chi2, p, dof, expected = stats.chi2_contingency(observed)")
-                        code_lines.append(f"print(f\"\\nChi-Square Test:\")")
-                        code_lines.append(f"print(f\"  Chi-square statistic: {chi2:.4f}\")")
-                        code_lines.append(f"print(f\"  p-value: {p:.4f}\")")
-                        code_lines.append(f"print(f\"  Degrees of freedom: {dof}\")")
-                        code_lines.append(f"print(f\"  Significant at alpha=0.05: {p < 0.05}\")")
-                        code_lines.append(f"")
-                        code_lines.append(f"# Expected frequencies")
-                        code_lines.append(f"expected_df = pd.DataFrame(")
-                        code_lines.append(f"    expected, ")
-                        code_lines.append(f"    index=observed.index, ")
-                        code_lines.append(f"    columns=observed.columns")
-                        code_lines.append(f")")
-                        code_lines.append(f"print(f\"\\nExpected frequencies:\")")
-                        code_lines.append(f"print(expected_df)")
-                    
-                    if plot_option:
-                        code_lines.append(f"")
-                        code_lines.append(f"# Visualize crosstabulation")
-                        code_lines.append(f"plt.figure(figsize=(14, 6))")
-                        
-                        code_lines.append(f"plt.subplot(1, 2, 1)")
-                        code_lines.append(f"crosstab_for_plot = pd.crosstab({data_df}['{var1}'], {data_df}['{var2}'])")
-                        code_lines.append(f"sns.heatmap(crosstab_for_plot, annot=True, fmt='d', cmap='Blues')")
-                        code_lines.append(f"plt.title(f\"Frequency heatmap: {var1} × {var2}\")")
-                        
-                        code_lines.append(f"plt.subplot(1, 2, 2)")
-                        code_lines.append(f"sns.heatmap(row_pct.iloc[:-1, :-1], annot=True, fmt='.1f', cmap='YlGnBu')")
-                        code_lines.append(f"plt.title(f\"Row percentage heatmap: {var1} × {var2}\")")
-                        
-                        code_lines.append(f"plt.tight_layout()")
-                        code_lines.append(f"plt.show()")
-                        
-                        code_lines.append(f"")
-                        code_lines.append(f"# Stacked bar chart")
-                        code_lines.append(f"crosstab_for_plot.plot(kind='bar', stacked=True, figsize=(10, 6))")
-                        code_lines.append(f"plt.title(f\"Stacked bar chart: {var1} × {var2}\")")
-                        code_lines.append(f"plt.xlabel(f\"{var1}\")")
-                        code_lines.append(f"plt.ylabel('Frequency')")
-                        code_lines.append(f"plt.legend(title=f\"{var2}\")")
-                        code_lines.append(f"plt.tight_layout()")
-                        code_lines.append(f"plt.show()")
-                
+                        code_lines.extend([
+                            "",
+                            "# Chi-square test",
+                            "chi2, p_value, dof, expected = stats.chi2_contingency(ctab)",
+                            "print('\\nChi-square test results:')",
+                            "print(f'Chi-square statistic: {chi2:.4f}')",
+                            "print(f'p-value: {p_value:.4f}')",
+                            "print(f'Degrees of freedom: {dof}')",
+                            "print(f'Significant at α=0.05: {p_value < 0.05}')"
+                        ])
                 else:
-                    # Multi-way tables (3+)
-                    vars_str = " × ".join(table_vars)
-                    code_lines.append(f"# Multi-way table for {vars_str}")
-                    code_lines.append(f"# Creating a multi-way frequency table")
-                    code_lines.append(f"multi_tab = pd.crosstab(")
-                    code_lines.append(f"    [{data_df}['{table_vars[0]}'], {data_df}['{table_vars[1]}']],")
-                    code_lines.append(f"    {data_df}['{table_vars[2]}'],")
-                    code_lines.append(f"    margins=True, margins_name='Total'")
-                    code_lines.append(f")")
-                    code_lines.append(f"print(f\"\\nMulti-way table for {vars_str}:\")")
-                    code_lines.append(f"print(multi_tab)")
-        else:
-            code_lines.append(f"# No TABLES statement found in PROC FREQ. Please check the SAS code.")
-            code_lines.append(f"# Generic frequency analysis on all categorical columns")
-            code_lines.append(f"cat_cols = {data_df}.select_dtypes(include=['object', 'category']).columns")
-            code_lines.append(f"for col in cat_cols:")
-            code_lines.append(f"    print(f\"\\nFrequency distribution for {{col}}:\")")
-            code_lines.append(f"    freq = {data_df}[col].value_counts().reset_index()")
-            code_lines.append(f"    freq.columns = [col, 'Frequency']")
-            code_lines.append(f"    freq['Percent'] = 100 * freq['Frequency'] / freq['Frequency'].sum()")
-            code_lines.append(f"    print(freq)")
+                    code_lines.extend([
+                        f"# Frequency distribution of {table_spec}",
+                        f"freq = {dataset}_df['{table_spec}'].value_counts()",
+                        f"pct = {dataset}_df['{table_spec}'].value_counts(normalize=True) * 100",
+                        "freq_df = pd.DataFrame({",
+                        "    'Frequency': freq,",
+                        "    'Percentage': pct,",
+                        "    'Cumulative Freq': freq.cumsum(),",
+                        "    'Cumulative Pct': pct.cumsum()",
+                        "})",
+                        "print('\\nFrequency Distribution:')",
+                        "print(freq_df)"
+                    ])
+        
+        return "\n".join(code_lines)
+
+    def _convert_proc_corr(self, component: SASComponent) -> str:
+        """Convert PROC CORR to pandas correlation analysis."""
+        # Extract dataset and variables
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
+        with_match = re.search(r'with\s+(.*?);', component.content, re.IGNORECASE)
+        
+        dataset = data_match.group(1) if data_match else "df"
+        dataset = dataset.replace('&', '')  # Handle macro variables
+        
+        code_lines = []
+        code_lines.append("# Calculate correlations")
+        
+        if var_match:
+            variables = var_match.group(1).split()
+            if with_match:
+                # Correlation between specific sets of variables
+                with_vars = with_match.group(1).split()
+                var_list = ", ".join(f"'{v}'" for v in variables)
+                with_list = ", ".join(f"'{v}'" for v in with_vars)
+                code_lines.extend([
+                    f"var_cols = [{var_list}]",
+                    f"with_cols = [{with_list}]",
+                    f"corr = {dataset}_df[var_cols].corrwith({dataset}_df[with_cols])",
+                    "print('\\nCorrelations:')",
+                    "print(corr)"
+                ])
+            else:
+                # Correlation matrix for all specified variables
+                var_list = ", ".join(f"'{v}'" for v in variables)
+                code_lines.extend([
+                    f"corr_matrix = {dataset}_df[[{var_list}]].corr()",
+                    "print('\\nCorrelation Matrix:')",
+                    "print(corr_matrix)",
+                    "",
+                    "# Create correlation heatmap",
+                    "plt.figure(figsize=(10, 8))",
+                    "sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0)",
+                    "plt.title('Correlation Heatmap')",
+                    "plt.tight_layout()",
+                    "plt.show()"
+                ])
         
         return "\n".join(code_lines)
 
     def _convert_format(self, component: SASComponent) -> str:
-        """Convert SAS FORMAT/INFORMAT statements to Python functions."""
+        """Convert SAS FORMAT statements to Python format functions."""
         code_lines = []
-        content = component.content
         
-        if component.type == "FORMAT":
-            code_lines.append("# Define formatter functions for data display")
-            
-            # Extract format specifications
-            format_specs = re.findall(r'(\w+)(?:\.|\:)(\w+)', content)
-            
-            for var, format_type in format_specs:
-                if format_type.upper() in ['DATE', 'DATETIME', 'TIME']:
-                    code_lines.append(f"# Format {var} as {format_type}")
-                    code_lines.append(f"def format_{var.lower()}(value):")
-                    code_lines.append(f"    return pd.to_datetime(value).strftime('%Y-%m-%d')")
-                elif format_type.isdigit() or (format_type[0].isdigit() and '.' in format_type):
-                    # Numeric format like 8.2
-                    code_lines.append(f"# Format {var} with {format_type} precision")
-                    code_lines.append(f"def format_{var.lower()}(value):")
-                    if '.' in format_type:
-                        width, precision = format_type.split('.')
-                        code_lines.append(f"    return f'{{value:{width}.{precision}f}}'")
-                    else:
-                        code_lines.append(f"    return f'{{value:{format_type}}}'")
-                else:
-                    code_lines.append(f"# Format {var} with custom format {format_type}")
-                    code_lines.append(f"def format_{var.lower()}(value):")
-                    code_lines.append(f"    return str(value)")
-        
-        elif component.type == "INFORMAT":
-            code_lines.append("# Define parser functions for data import")
-            
-            # Extract informat specifications
-            informat_specs = re.findall(r'(\w+)(?:\.|\:)(\w+)', content)
-            
-            for var, informat_type in informat_specs:
-                if informat_type.upper() in ['DATE', 'DATETIME', 'TIME']:
-                    code_lines.append(f"# Parse {var} as {informat_type}")
-                    code_lines.append(f"def parse_{var.lower()}(value):")
-                    code_lines.append(f"    return pd.to_datetime(value)")
-                elif informat_type.upper() == 'BEST':
-                    code_lines.append(f"# Parse {var} as numeric (best width)")
-                    code_lines.append(f"def parse_{var.lower()}(value):")
-                    code_lines.append(f"    try:")
-                    code_lines.append(f"        return float(value)")
-                    code_lines.append(f"    except (ValueError, TypeError):")
-                    code_lines.append(f"        return pd.NA")
-                else:
-                    code_lines.append(f"# Parse {var} with custom informat {informat_type}")
-                    code_lines.append(f"def parse_{var.lower()}(value):")
-                    code_lines.append(f"    return value")
-        
-        # Handle generic format statements
-        if not code_lines or len(code_lines) <= 2:
-            format_match = re.search(r'format\s+(.*?);', content, re.IGNORECASE)
-            if format_match:
-                formats = format_match.group(1).strip()
-                code_lines.append("# Apply formatting to variables")
-                code_lines.append("def apply_formats(df):")
-                code_lines.append("    \"\"\"Apply SAS-like formats to DataFrame columns\"\"\"")
-                code_lines.append("    formatted_df = df.copy()")
-                
-                for format_spec in formats.split():
-                    if ':' in format_spec:
-                        var, fmt = format_spec.split(':', 1)
-                        code_lines.append(f"    # Format {var} as {fmt}")
-                        if fmt.startswith('$'):
-                            code_lines.append(f"    formatted_df['{var}'] = formatted_df['{var}'].astype(str)")
-                        elif fmt.lower().startswith(('date', 'time')):
-                            code_lines.append(f"    formatted_df['{var}'] = pd.to_datetime(formatted_df['{var}'])")
-                        elif any(c.isdigit() for c in fmt):
-                            code_lines.append(f"    formatted_df['{var}'] = formatted_df['{var}'].apply(lambda x: f'{{x:.{fmt}f}}' if pd.notna(x) else '')")
-                
-                code_lines.append("    return formatted_df")
+        # Extract format name and definition
+        format_match = re.search(r'FORMAT\s+(.*?);', component.content, re.IGNORECASE)
+        if format_match:
+            formats = format_match.group(1).split()
+            for fmt in formats:
+                if '.' in fmt:
+                    var, format_type = fmt.split('.')
+                    code_lines.extend([
+                        f"# Apply format to {var}",
+                        f"if '{format_type}' in globals():",
+                        f"    {var}_formatted = {var}_df['{var}'].apply(apply_{format_type}_format)",
+                        f"else:",
+                        f"    {var}_formatted = {var}_df['{var}'].astype(str)"
+                    ])
         
         return "\n".join(code_lines)
 
     def _convert_title_footnote(self, component: SASComponent) -> str:
-        """Convert SAS TITLE/FOOTNOTE statements to matplotlib title/figtext."""
+        """Convert SAS TITLE/FOOTNOTE statements to Python plot titles."""
         content = component.content.strip()
+        text = re.search(r'(?:TITLE|FOOTNOTE)\s*\d*\s*["\'](.*?)["\']', content, re.IGNORECASE)
         
-        if component.type == "TITLE":
-            # Extract title number and text
-            title_match = re.search(r'TITLE(\d*)\s+(.*?);', content, re.IGNORECASE)
-            if title_match:
-                title_num = title_match.group(1) or "1"  # Default to 1 if not specified
-                title_text = title_match.group(2).strip()
-                
-                # For use with matplotlib
-                code_lines = []
-                code_lines.append("# Set plot title")
-                code_lines.append(f"plt.suptitle({title_text}, fontsize={14+2*(1-int(title_num))})")
-                
-                # For general title use
-                code_lines.append(f"title_{title_num} = {title_text}")
-                
-                return "\n".join(code_lines)
+        if text:
+            title_text = text.group(1)
+            if component.type.upper() == 'TITLE':
+                return f"title_{component.name} = \"{title_text}\"\nplt.suptitle(\"{title_text}\", fontsize=14)"
+            else:
+                return f"footnote_{component.name} = \"{title_text}\"\nplt.figtext(0.5, 0.01, \"{title_text}\", ha='center')"
         
-        elif component.type == "FOOTNOTE":
-            # Extract footnote number and text
-            footnote_match = re.search(r'FOOTNOTE(\d*)\s+(.*?);', content, re.IGNORECASE)
-            if footnote_match:
-                footnote_num = footnote_match.group(1) or "1"  # Default to 1 if not specified
-                footnote_text = footnote_match.group(2).strip()
-                
-                code_lines = []
-                code_lines.append("# Add footnote to plot")
-                code_lines.append(f"plt.figtext(0.5, 0.01, {footnote_text}, ha='center', fontsize=10)")
-                
-                return "\n".join(code_lines)
-        
-        # Default fallback
-        return f"# TODO: Convert {component.type}\n# {content}"
+        return f"# TODO: Convert complex {component.type}\n# {content}"
 
     def _convert_ods(self, component: SASComponent) -> str:
-        """Convert ODS statements to Python plotting configuration."""
-        content = component.content.strip()
-        
+        """Convert ODS statements to Python visualization setup."""
+        content = component.content.lower()
         code_lines = []
         
-        # Handle ODS GRAPHICS ON/OFF
-        if re.search(r'ODS\s+GRAPHICS\s+ON', content, re.IGNORECASE):
-            code_lines.append("# Enable Matplotlib and seaborn for graphics")
-            code_lines.append("import matplotlib.pyplot as plt")
-            code_lines.append("import seaborn as sns")
-            code_lines.append("plt.rcParams['figure.figsize'] = (10, 6)")
-            code_lines.append("plt.rcParams['figure.dpi'] = 100")
-            
-        elif re.search(r'ODS\s+GRAPHICS\s+OFF', content, re.IGNORECASE):
-            code_lines.append("# Close all open plots")
-            code_lines.append("plt.close('all')")
-        
-        # Handle ODS HTML
-        html_match = re.search(r'ODS\s+HTML\s+PATH\s*=\s*[\'"]?(.*?)[\'"]?(?:\s+|$)', content, re.IGNORECASE)
-        if html_match:
-            path = html_match.group(1)
-            code_lines.append("# Setup output directory for HTML reports")
-            code_lines.append(f"import os")
-            code_lines.append(f"output_dir = {repr(path)}")
-            code_lines.append(f"os.makedirs(output_dir, exist_ok=True)")
-            
-            # Handle body parameter
-            body_match = re.search(r'BODY\s*=\s*[\'"]?(.*?)[\'"]?(?:\s+|$)', content, re.IGNORECASE)
-            if body_match:
-                body = body_match.group(1)
-                code_lines.append(f"html_file = os.path.join(output_dir, {repr(body)})")
-        
-        # Handle ODS HTML CLOSE
-        if re.search(r'ODS\s+HTML\s+CLOSE', content, re.IGNORECASE):
-            code_lines.append("# Complete HTML output")
-            code_lines.append("# If using a library like pandas HTML output:")
-            code_lines.append("# with open(html_file, 'w') as f:")
-            code_lines.append("#     f.write(html_content)")
-        
-        if not code_lines:
-            code_lines.append(f"# TODO: Convert complex ODS statement\n# {content}")
+        if 'graphics' in content:
+            if 'on' in content:
+                code_lines.extend([
+                    "# Enable high-quality graphics",
+                    "import matplotlib.pyplot as plt",
+                    "import seaborn as sns",
+                    "plt.style.use('seaborn')",
+                    "plt.rcParams.update({",
+                    "    'figure.figsize': (10, 6),",
+                    "    'figure.dpi': 100,",
+                    "    'savefig.dpi': 300,",
+                    "    'font.size': 10,",
+                    "    'axes.titlesize': 12,",
+                    "    'axes.labelsize': 10,",
+                    "    'axes.grid': True",
+                    "})",
+                    "sns.set_theme(style='whitegrid')"
+                ])
+            elif 'off' in content:
+                code_lines.extend([
+                    "# Close all plots",
+                    "plt.close('all')"
+                ])
+        elif 'html' in content:
+            if 'close' in content:
+                code_lines.extend([
+                    "# Close HTML output",
+                    "if 'html_file' in locals():",
+                    "    with open(html_file, 'w') as f:",
+                    "        f.write(html_content)"
+                ])
+            else:
+                path_match = re.search(r'path\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+                file_match = re.search(r'body\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+                
+                code_lines.extend([
+                    "# Setup HTML output",
+                    "import os",
+                    f"output_dir = {repr(path_match.group(1) if path_match else './output')}",
+                    "os.makedirs(output_dir, exist_ok=True)",
+                    f"html_file = os.path.join(output_dir, {repr(file_match.group(1) if file_match else 'output.html')})",
+                    "html_content = []"
+                ])
         
         return "\n".join(code_lines)
 
-    def _convert_proc_report(self, component: SASComponent) -> str:
-        """Convert PROC REPORT to pandas DataFrame formatting and display."""
-        # Extract parameters
+    def _convert_proc_print(self, component: SASComponent) -> str:
+        """Convert PROC PRINT to pandas display."""
         data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
-        column_match = re.search(r'column\s+(.*?);', component.content, re.IGNORECASE)
+        dataset = data_match.group(1) if data_match else "df"
         
-        code_lines = []
+        return f"# Display dataset contents\nprint({dataset}_df)"
+
+    def _convert_proc_report(self, component: SASComponent) -> str:
+        """Convert PROC REPORT to pandas DataFrame display with formatting."""
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        dataset = data_match.group(1) if data_match else "df"
         
-        # Handle data parameter
-        if data_match:
-            data_name = self._convert_dataset_name(data_match.group(1))
-        else:
-            data_name = "df"  # Default name
-        
-        code_lines.append("# Generate report from data")
-        code_lines.append(f"report_df = {data_name}.copy()")
-        
-        # Handle column definitions
-        if column_match:
-            columns = [c.strip() for c in column_match.group(1).split()]
-            code_lines.append(f"# Select and order columns for report")
-            code_lines.append(f"report_df = report_df[{columns}]")
-            
-            # Extract define statements for column formatting
-            define_matches = re.findall(r'define\s+(\w+)\s*/\s*([^;]*);', component.content, re.IGNORECASE)
-            format_dict = {}
-            
-            for col, options in define_matches:
-                # Extract display label
-                label_match = re.search(r'\'([^\']+)\'', options)
-                if label_match:
-                    label = label_match.group(1)
-                    format_dict[col] = f"'{label}'"
-            
-            if format_dict:
-                format_str = ", ".join([f"'{k}': {v}" for k, v in format_dict.items()])
-                code_lines.append(f"# Rename columns with display labels")
-                code_lines.append(f"report_df = report_df.rename(columns={{{format_str}}})")
-        
-        # Add display code
-        code_lines.append("# Display formatted report")
-        code_lines.append("from IPython.display import display, HTML")
-        code_lines.append("html_report = report_df.to_html(index=False)")
-        code_lines.append("display(HTML(html_report))")
-        code_lines.append("")
-        code_lines.append("# Save report to file if needed")
-        code_lines.append("# report_df.to_html('report.html', index=False)")
-        code_lines.append("# report_df.to_csv('report.csv', index=False)")
-        
+        code_lines = [
+            "# Generate formatted report",
+            f"print('\\nReport for {dataset}:')",
+            f"display({dataset}_df.style.format(precision=2))"
+        ]
         return "\n".join(code_lines)
-    
+
     def _convert_proc_format(self, component: SASComponent) -> str:
-        """Convert SAS FORMAT statements to Python dictionaries and functions."""
-        content = component.content
+        """Convert PROC FORMAT to Python dictionaries/functions."""
         code_lines = []
         
         # Extract format definitions
-        format_patterns = re.finditer(r'value\s+(\$?\w+)\s+(.*?);', content, re.DOTALL | re.IGNORECASE)
+        value_matches = re.finditer(r'value\s+(\w+)\s+(.*?);', component.content, re.DOTALL | re.IGNORECASE)
         
-        for match in format_patterns:
+        for match in value_matches:
             format_name = match.group(1)
-            format_content = match.group(2)
+            format_def = match.group(2)
             
-            # Check if it's a character format ($)
-            is_char_format = format_name.startswith('$')
-            if is_char_format:
-                format_name = format_name[1:]  # Remove $ for variable name
+            code_lines.extend([
+                f"{format_name}_format = {{",
+                "    # Format mapping"
+            ])
             
-            code_lines.append(f"# Define {format_name} format mapping")
-            code_lines.append(f"{format_name}_format = {{")
-            
-            # Handle character formats
-            if is_char_format:
-                # Extract pattern: 'value' = 'label'
-                value_patterns = re.finditer(r"['\"]([^'\"]+)['\"](\s*|\s+\w+\s+)=\s*['\"]([^'\"]+)['\"]", format_content)
-                for val_match in value_patterns:
-                    value = val_match.group(1)
-                    label = val_match.group(3)
-                    code_lines.append(f"    '{value}': '{label}',")
-                
-                # Handle 'other' or default case
-                other_match = re.search(r"other\s*=\s*['\"]([^'\"]+)['\"]", format_content, re.IGNORECASE)
-                if other_match:
-                    code_lines.append(f"    'default': '{other_match.group(1)}',")
-            else:
-                # Handle numeric ranges: low-high = 'label'
-                range_patterns = re.finditer(r"([^-=]+)-([^-=]+)\s*=\s*['\"]([^'\"]+)['\"]", format_content)
-                for range_match in range_patterns:
-                    low = range_match.group(1).strip()
-                    high = range_match.group(2).strip()
-                    label = range_match.group(3)
-                    
-                    # Handle special values like 'low' and 'high'
+            # Parse format entries with better regex
+            entries = re.findall(r'([\'"]?[\w\s<>.-]+[\'"]?)\s*=\s*[\'"](.*?)[\'"]', format_def)
+            for key, value in entries:
+                key = key.strip().strip("'\"")
+                if key.lower() == 'other':
+                    code_lines.append(f"    'default': '{value}',")
+                elif '-' in key:
+                    low, high = [x.strip() for x in key.split('-')]
                     if low.lower() == 'low':
-                        code_lines.append(f"    'range_low': {{")
-                        code_lines.append(f"        'upper': {high},")
-                        code_lines.append(f"        'label': '{label}'")
-                        code_lines.append(f"    }},")
+                        code_lines.append(f"    lambda x: float(x) <= float('{high}'): '{value}',")
                     elif high.lower() == 'high':
-                        code_lines.append(f"    'range_high': {{")
-                        code_lines.append(f"        'lower': {low},")
-                        code_lines.append(f"        'label': '{label}'")
-                        code_lines.append(f"    }},")
+                        code_lines.append(f"    lambda x: float(x) > float('{low}'): '{value}',")
                     else:
-                        code_lines.append(f"    'range_{low}_{high}': {{")
-                        code_lines.append(f"        'lower': {low},")
-                        code_lines.append(f"        'upper': {high},")
-                        code_lines.append(f"        'label': '{label}'")
-                        code_lines.append(f"    }},")
+                        code_lines.append(f"    lambda x: float('{low}') <= float(x) <= float('{high}'): '{value}',")
+                else:
+                    code_lines.append(f"    '{key}': '{value}',")
             
             code_lines.append("}")
             
-            # Add function to apply the format
-            code_lines.append(f"\ndef apply_{format_name}_format(value):")
-            code_lines.append(f"    \"\"\"Apply the {format_name} format to values.\"\"\"")
-            
-            if is_char_format:
-                code_lines.append(f"    value_str = str(value)")
-                code_lines.append(f"    if value_str in {format_name}_format:")
-                code_lines.append(f"        return {format_name}_format[value_str]")
-                code_lines.append(f"    elif 'default' in {format_name}_format:")
-                code_lines.append(f"        return {format_name}_format['default']")
-                code_lines.append(f"    return value_str")
-            else:
-                code_lines.append(f"    try:")
-                code_lines.append(f"        num_value = float(value)")
-                code_lines.append(f"        # Check low range")
-                code_lines.append(f"        if 'range_low' in {format_name}_format and num_value <= float({format_name}_format['range_low']['upper']):")
-                code_lines.append(f"            return {format_name}_format['range_low']['label']")
-                code_lines.append(f"        # Check high range")
-                code_lines.append(f"        if 'range_high' in {format_name}_format and num_value >= float({format_name}_format['range_high']['lower']):")
-                code_lines.append(f"            return {format_name}_format['range_high']['label']")
-                code_lines.append(f"        # Check middle ranges")
-                code_lines.append(f"        for key, range_info in {format_name}_format.items():")
-                code_lines.append(f"            if key.startswith('range_') and key not in ['range_low', 'range_high']:")
-                code_lines.append(f"                if float(range_info['lower']) <= num_value <= float(range_info['upper']):")
-                code_lines.append(f"                    return range_info['label']")
-                code_lines.append(f"        return value")
-                code_lines.append(f"    except (ValueError, TypeError):")
-                code_lines.append(f"        return value")
+            # Add format function with better error handling
+            code_lines.extend([
+                "",
+                f"def apply_{format_name}_format(value):",
+                f"    \"\"\"Apply {format_name} format to value.",
+                f"    Args:",
+                f"        value: Value to format",
+                f"    Returns:",
+                f"        Formatted string value",
+                f"    \"\"\"",
+                "    try:",
+                "        if pd.isna(value):",
+                "            return ''",
+                "        if isinstance(value, (int, float)):",
+                "            # Handle numeric values",
+                "            for condition, result in {format_name}_format.items():",
+                "                if callable(condition) and condition(value):",
+                "                    return result",
+                "        # Handle string/other values",
+                "        str_value = str(value)",
+                "        return {format_name}_format.get(str_value,",
+                "            {format_name}_format.get('default', str_value))",
+                "    except Exception as e:",
+                "        return str(value)  # Return original value on error"
+            ])
         
         return "\n".join(code_lines)
 
-    def _convert_data_step(self, component: SASComponent, similar_content: List[str]) -> str:
-        """Convert SAS DATA step to Python pandas operations."""
-        # Get dataset name
-        dataset_name = component.name
-        
-        # Check for special cases
-        if dataset_name == "_NULL_":
-            return self._convert_null_data_step(component)
-        
-        # Extract key components
-        set_match = re.search(r'\bSET\s+(.*?);', component.content, re.IGNORECASE)
-        merge_match = re.search(r'\bMERGE\s+(.*?);', component.content, re.IGNORECASE)
-        by_match = re.search(r'\bBY\s+(.*?);', component.content, re.IGNORECASE)
-        
-        # Start building code
+    def _convert_data_step(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
+        """Convert SAS DATA step to pandas operations."""
         code_lines = []
         
-        # Convert dataset names
-        output_df = self._convert_dataset_name(dataset_name)
+        # Extract input and output datasets
+        set_match = re.search(r'SET\s+(\w+\.?\w*)', component.content, re.IGNORECASE)
+        data_match = re.search(r'DATA\s+(\w+)', component.content, re.IGNORECASE)
         
-        # Handle SET statement
-        if set_match:
-            input_datasets = [ds.strip() for ds in set_match.group(1).split()]
-            if len(input_datasets) == 1:
-                input_df = self._convert_dataset_name(input_datasets[0])
-                code_lines.append(f"# Create a copy of the input dataset")
-                code_lines.append(f"{output_df} = {input_df}.copy()")
-            else:
-                # Multiple datasets - concatenate
-                input_dfs = [self._convert_dataset_name(ds) for ds in input_datasets]
-                code_lines.append(f"# Concatenate multiple datasets")
-                code_lines.append(f"{output_df} = pd.concat([{', '.join(input_dfs)}], ignore_index=True)")
+        if set_match and data_match:
+            input_ds = self._convert_dataset_name(set_match.group(1))
+            output_ds = self._convert_dataset_name(data_match.group(1))
             
-            # Extract variable assignments
-            assignments = re.findall(r'(\w+)\s*=\s*(.*?);', component.content)
-            for var, expr in assignments:
-                # Convert SAS expression to Python
-                py_expr = self._convert_sas_expression(expr)
-                code_lines.append(f"{output_df}['{var}'] = {py_expr}")
+            code_lines.extend([
+                f"# Create new dataset from {input_ds}",
+                f"{output_ds} = {input_ds}.copy()"
+            ])
             
-            # Handle IF statements
-            if_statements = re.findall(r'if\s+(.*?)\s+then\s+(.*?);', component.content, re.IGNORECASE | re.DOTALL)
-            for condition, action in if_statements:
-                py_condition = self._convert_sas_condition(condition)
-                # Check if action is a variable assignment
-                assignment_match = re.search(r'(\w+)\s*=\s*(.*)', action)
-                if assignment_match:
-                    var, expr = assignment_match.groups()
-                    py_expr = self._convert_sas_expression(expr)
-                    code_lines.append(f"# Apply conditional transformation")
-                    code_lines.append(f"{output_df}.loc[{py_condition}, '{var}'] = {py_expr}")
-                else:
-                    # Other actions
-                    code_lines.append(f"# TODO: Convert complex IF-THEN action: {action}")
-            
-            # Handle WHERE clauses
-            where_match = re.search(r'where\s+(.*?);', component.content, re.IGNORECASE)
+            # Handle WHERE clause
+            where_match = re.search(r'WHERE\s+(.*?);', component.content, re.IGNORECASE)
             if where_match:
-                where_condition = where_match.group(1)
-                py_condition = self._convert_sas_condition(where_condition)
-                code_lines.append(f"# Filter data based on WHERE clause")
-                code_lines.append(f"{output_df} = {output_df}[{py_condition}]")
+                condition = self._convert_where_clause(where_match.group(1))
+                code_lines.append(f"{output_ds} = {output_ds}[{condition}]")
             
-            # Handle DROP and KEEP statements
-            drop_match = re.search(r'drop\s+(.*?);', component.content, re.IGNORECASE)
-            keep_match = re.search(r'keep\s+(.*?);', component.content, re.IGNORECASE)
+            # Handle DROP/KEEP statements
+            drop_match = re.search(r'DROP\s+(.*?);', component.content, re.IGNORECASE)
+            keep_match = re.search(r'KEEP\s+(.*?);', component.content, re.IGNORECASE)
             
             if drop_match:
-                drop_vars = [v.strip() for v in drop_match.group(1).split()]
-                drop_vars_str = "[" + ", ".join([f"'{v}'" for v in drop_vars]) + "]"
-                code_lines.append(f"# Drop variables")
-                code_lines.append(f"{output_df} = {output_df}.drop(columns={drop_vars_str})")
+                columns = [col.strip() for col in drop_match.group(1).split()]
+                code_lines.append(f"{output_ds} = {output_ds}.drop(columns=[{', '.join(f''''{col}' ''' for col in columns)}])")
+            elif keep_match:
+                columns = [col.strip() for col in keep_match.group(1).split()]
+                code_lines.append(f"{output_ds} = {output_ds}[[{', '.join(f''''{col}' ''' for col in columns)}]]")
             
-            if keep_match:
-                keep_vars = [v.strip() for v in keep_match.group(1).split()]
-                keep_vars_str = "[" + ", ".join([f"'{v}'" for v in keep_vars]) + "]"
-                code_lines.append(f"# Keep only specified variables")
-                code_lines.append(f"{output_df} = {output_df}[{keep_vars_str}]")
-                
-        # Handle MERGE statement
-        elif merge_match:
-            input_datasets = [ds.strip() for ds in merge_match.group(1).split()]
-            input_dfs = [self._convert_dataset_name(ds) for ds in input_datasets]
-            
-            if len(input_dfs) >= 2 and by_match:
-                by_vars = [v.strip() for v in by_match.group(1).split()]
-                by_vars_str = "[" + ", ".join([f"'{v}'" for v in by_vars]) + "]"
-                
-                # Merge first two datasets
-                code_lines.append(f"# Merge datasets on {', '.join(by_vars)}")
-                code_lines.append(f"{output_df} = pd.merge({input_dfs[0]}, {input_dfs[1]}, on={by_vars_str}, how='outer')")
-                
-                # Handle more than two datasets
-                for i in range(2, len(input_dfs)):
-                    code_lines.append(f"{output_df} = pd.merge({output_df}, {input_dfs[i]}, on={by_vars_str}, how='outer')")
-            else:
-                code_lines.append(f"# TODO: Convert MERGE without BY statement")
-                code_lines.append(f"# Original code: {merge_match.group(0)}")
-        else:
-            # Creating a new dataset
-            code_lines.append(f"# Create a new DataFrame")
-            code_lines.append(f"{output_df} = pd.DataFrame()")
-            
-            # Extract variable assignments
-            assignments = re.findall(r'(\w+)\s*=\s*(.*?);', component.content)
-            for var, expr in assignments:
-                # Convert SAS expression to Python
-                py_expr = self._convert_sas_expression(expr)
-                code_lines.append(f"{output_df}['{var}'] = {py_expr}")
+            # Handle RENAME statement
+            rename_match = re.search(r'RENAME\s+(.*?);', component.content, re.IGNORECASE)
+            if rename_match:
+                rename_dict = {}
+                renames = rename_match.group(1).split()
+                for rename in renames:
+                    if '=' in rename:
+                        old, new = rename.split('=')
+                        rename_dict[old.strip()] = new.strip()
+                if rename_dict:
+                    code_lines.append(f"{output_ds} = {output_ds}.rename(columns={rename_dict})")
         
         return "\n".join(code_lines)
 
@@ -1485,20 +1240,120 @@ class SASPythonConverter:
 
     def _convert_sql(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
         """Convert PROC SQL to pandas operations."""
-        # Extract SQL statements
-        sql_statements = re.findall(r'(SELECT.*?;|CREATE.*?;|INSERT.*?;|UPDATE.*?;|DELETE.*?;)', 
-                                  component.content, 
-                                  re.IGNORECASE | re.DOTALL)
-        
         code_lines = []
-        for stmt in sql_statements:
-            if 'SELECT' in stmt.upper():
-                code_lines.extend(self._convert_select_statement(stmt))
-            elif 'CREATE TABLE' in stmt.upper():
-                code_lines.extend(self._convert_create_table_statement(stmt))
-            # Add other SQL statement conversions
+        sql_content = component.content
+        
+        # Handle SELECT INTO with SEPARATED BY
+        select_into_match = re.search(
+            r'SELECT\s+(?:DISTINCT\s+)?(.+?)\s+INTO\s*:(\w+)(?:\s+SEPARATED\s+BY\s+[\'"](.*?)[\'"])?\s+FROM\s+(\w+)',
+            sql_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        if select_into_match:
+            columns = select_into_match.group(1).strip()
+            macro_var = select_into_match.group(2)
+            separator = select_into_match.group(3) if select_into_match.group(3) else " "
+            table = select_into_match.group(4)
+            
+            # Handle DISTINCT properly
+            if 'DISTINCT' in sql_content.upper():
+                code_lines.extend([
+                    f"# Get unique values into list",
+                    f"{macro_var} = sorted({table}_df['{columns}'].unique().tolist())",
+                    f"{macro_var}_str = '{separator}'.join(map(str, {macro_var}))"
+                ])
+            else:
+                code_lines.extend([
+                    f"# Get values into list",
+                    f"{macro_var} = {table}_df['{columns}'].tolist()",
+                    f"{macro_var}_str = '{separator}'.join(map(str, {macro_var}))"
+                ])
+        else:
+            # Handle other SQL operations
+            code_lines.extend(self._convert_complex_sql(sql_content))
         
         return "\n".join(code_lines)
+
+    def _convert_complex_sql(self, sql_content: str) -> List[str]:
+        """Convert complex SQL operations to pandas."""
+        code_lines = []
+        
+        # Extract main parts of SQL query
+        select_match = re.search(
+            r'SELECT\s+(.*?)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.*?))?(?:\s+GROUP\s+BY\s+(.*?))?(?:\s+ORDER\s+BY\s+(.*?))?;',
+            sql_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        if select_match:
+            columns = select_match.group(1).strip()
+            table = select_match.group(2)
+            where_clause = select_match.group(3)
+            group_by = select_match.group(4)
+            order_by = select_match.group(5)
+            
+            # Start with base DataFrame
+            code_lines.append(f"# Get base DataFrame")
+            code_lines.append(f"result_df = {table}_df.copy()")
+            
+            # Handle WHERE clause
+            if where_clause:
+                conditions = self._convert_where_clause(where_clause)
+                code_lines.extend([
+                    "# Apply WHERE conditions",
+                    f"result_df = result_df[{conditions}]"
+                ])
+            
+            # Handle GROUP BY
+            if group_by:
+                group_cols = [col.strip() for col in group_by.split(',')]
+                code_lines.extend([
+                    "# Group data",
+                    f"result_df = result_df.groupby([{', '.join(f''''{col}' ''' for col in group_cols)}]).agg({{"
+                ])
+                
+                # Handle aggregations in SELECT
+                if re.search(r'(COUNT|SUM|AVG|MEAN|MIN|MAX)\s*\(', columns, re.IGNORECASE):
+                    aggs = self._parse_aggregations(columns)
+                    code_lines.extend([f"    '{col}': '{agg}'," for col, agg in aggs.items()])
+                    code_lines.append("}).reset_index()")
+                else:
+                    code_lines.append("    'size': 'count'}).reset_index()")
+            
+            # Handle ORDER BY
+            if order_by:
+                sort_cols = []
+                ascending = []
+                for col in order_by.split(','):
+                    col = col.strip()
+                    if 'DESC' in col.upper():
+                        sort_cols.append(col.replace('DESC', '').strip())
+                        ascending.append(False)
+                    else:
+                        sort_cols.append(col.replace('ASC', '').strip())
+                        ascending.append(True)
+                
+                code_lines.extend([
+                    "# Sort results",
+                    f"result_df = result_df.sort_values([{', '.join(f''''{col}' ''' for col in sort_cols)}], ",
+                    f"    ascending={ascending})"
+                ])
+        
+        return code_lines
+
+    def _convert_where_clause(self, where_clause: str) -> str:
+        """Convert SQL WHERE clause to pandas boolean expression."""
+        # Replace SQL operators with Python/pandas operators
+        clause = where_clause.strip()
+        clause = re.sub(r'\bAND\b', '&', clause, flags=re.IGNORECASE)
+        clause = re.sub(r'\bOR\b', '|', clause, flags=re.IGNORECASE)
+        clause = re.sub(r'\bIN\b', 'isin', clause, flags=re.IGNORECASE)
+        clause = re.sub(r'\bLIKE\b', 'str.contains', clause, flags=re.IGNORECASE)
+        clause = re.sub(r'\bIS NULL\b', '.isna()', clause, flags=re.IGNORECASE)
+        clause = re.sub(r'\bIS NOT NULL\b', '.notna()', clause, flags=re.IGNORECASE)
+        
+        return clause
 
     def _convert_macro(self, component: SASComponent, similar_components: List[Dict[str, Any]]) -> str:
         """Convert a SAS macro to a Python function."""
@@ -1517,24 +1372,29 @@ class SASPythonConverter:
                     param = param.strip()
                     if '=' in param:
                         name, default = param.split('=')
-                        params.append(f"{name.strip()}")  # Remove default values for now
+                        params.append(f"{name.strip()}")  # Remove default values
                     else:
                         params.append(param)
             
-            # Special handling for analyze_segment macro
+            # Special handling for known macros
             if macro_name == 'analyze_segment':
                 return self._convert_analyze_segment_macro(params)
             elif macro_name == 'run_analysis':
                 return self._convert_run_analysis_macro()
             
             # Default macro conversion
+            param_docs = [f"        {p}: Parameter description" for p in params]
+            param_docs_str = "\n".join(param_docs)
+            
             code_lines = [
                 f"def {macro_name}({', '.join(params)}):",
-                f"    \"\"\"Python function converted from SAS macro {macro_name}.\"\"\""
+                f"    \"\"\"Python function converted from SAS macro {macro_name}.",
+                f"    Args:",
+                f"{param_docs_str}",
+                f"    \"\"\"",
+                "    # TODO: Implement macro logic",
+                "    pass"
             ]
-            
-            # Add placeholder implementation
-            code_lines.append("    pass  # TODO: Implement macro body")
             
             return "\n".join(code_lines)
         
@@ -1586,10 +1446,21 @@ class SASPythonConverter:
     def _convert_run_analysis_macro(self) -> str:
         """Special conversion for run_analysis macro."""
         code = [
-            "def run_analysis(data):",
-            "    \"\"\"Run statistical analysis on the given data.\"\"\"",
-            "    # Add your analysis code here",
-            "    pass"
+            "def run_analysis():",
+            "    \"\"\"Run analysis on all segments in the data.\"\"\"",
+            "    # Get unique segments",
+            "    segments = analysis_data_df['segment'].unique()",
+            "",
+            "    # Process each segment",
+            "    for segment in segments:",
+            "        print(f\"\\nAnalyzing segment: {segment}\")",
+            "        analyze_segment(",
+            "            data=analysis_data_df,",
+            "            segment=segment,",
+            "            var='response_time'",
+            "        )",
+            "",
+            "    print(\"\\nAnalysis complete!\")"
         ]
         return "\n".join(code)
 
@@ -1679,25 +1550,39 @@ class SASPythonConverter:
         return f"# TODO: Convert PROC {proc_type}: {proc_statement}"
 
     def _convert_macro_variable(self, component: SASComponent) -> str:
-        """Convert SAS %LET statement to Python variable assignment."""
-        # Extract variable name and value
-        let_match = re.search(r'%LET\s+(\w+)\s*=\s*(.*?)\s*;', component.content, re.IGNORECASE)
+        """Convert macro variable references to Python variables."""
+        content = component.content
         
+        # Handle %LET statements
+        let_match = re.search(r'%LET\s+(\w+)\s*=\s*(.*?)\s*;', content, re.IGNORECASE)
         if let_match:
             var_name = let_match.group(1)
-            value = let_match.group(2)
+            value = let_match.group(2).strip()
             
-            # Convert value based on type
+            # Handle special macro functions
+            if value.startswith('%SCAN'):
+                scan_match = re.search(r'%SCAN\s*\((.*?),\s*(\d+)\)', value)
+                if scan_match:
+                    list_var = scan_match.group(1).strip('&')
+                    index = int(scan_match.group(2)) - 1  # Convert to 0-based indexing
+                    return f"{var_name} = {list_var}[{index}] if {index} < len({list_var}) else ''"
+            elif value.startswith('%EVAL'):
+                expr = value.replace('%EVAL', '').strip('()')
+                # Convert SAS operators to Python
+                expr = expr.replace('**', '^').replace('=', '==')
+                return f"{var_name} = {expr}"
+            
+            # Try numeric conversion
             try:
-                # Try numeric conversion
-                float_val = float(value)
-                if float_val.is_integer():
-                    return f"{var_name} = {int(float_val)}"
-                return f"{var_name} = {float_val}"
+                num_val = float(value)
+                if num_val.is_integer():
+                    return f"{var_name} = {int(num_val)}"
+                return f"{var_name} = {num_val}"
             except ValueError:
                 # String value
                 return f"{var_name} = '{value}'"
-        return f"# ERROR: Could not convert %LET statement\n# {component.content}"
+        
+        return f"# ERROR: Could not convert macro variable\n# {content}"
 
     def _convert_macro_statement(self, component: SASComponent) -> str:
         """Convert various SAS macro statements to Python."""
@@ -1743,18 +1628,40 @@ class SASPythonConverter:
         
         # ... rest of the method remains the same
 
-    def _convert_dataset_name(self, sas_name: str) -> str:
-        """Convert SAS dataset name to Python variable name."""
-        if sas_name.startswith('&'):
-            # Macro variable reference
-            return f"{sas_name[1:]}_df"
+    def _convert_dataset_name(self, dataset: str) -> str:
+        """Convert SAS dataset reference to Python variable name."""
+        # Handle macro variables
+        if dataset.startswith('&'):
+            return f"{dataset[1:]}_df"
         
-        # Handle library.dataset notation
-        if '.' in sas_name:
-            lib, ds = sas_name.split('.', 1)
-            return f"{ds.lower()}_df"
-        else:
-            return f"{sas_name.lower()}_df"
+        # Handle library references
+        if '.' in dataset:
+            lib, name = dataset.split('.')
+            if lib.lower() == 'sashelp':
+                return f"{name.lower()}_df"
+            elif lib.lower() == 'work':
+                return f"{name.lower()}_df"
+            else:
+                return f"{lib.lower()}_{name.lower()}_df"
+        
+        return f"{dataset.lower()}_df"
+
+    def _add_sashelp_loading(self) -> List[str]:
+        """Add code to load sashelp datasets."""
+        return [
+            "# Setup sashelp data directory",
+            "sashelp_dir = os.getenv('SASHELP_DIR', './sashelp')",
+            "os.makedirs(sashelp_dir, exist_ok=True)",
+            "",
+            "def load_sashelp_dataset(name: str) -> pd.DataFrame:",
+            "    \"\"\"Load a dataset from sashelp library.\"\"\"",
+            "    path = os.path.join(sashelp_dir, f'{name.lower()}.csv')",
+            "    try:",
+            "        return pd.read_csv(path)",
+            "    except Exception as e:",
+            "        print(f\"Error loading sashelp.{name}: {e}\")",
+            "        return pd.DataFrame()"
+        ]
 
     def _convert_sas_expression(self, expr: str) -> str:
         """Convert SAS expressions to Python."""
@@ -1962,48 +1869,28 @@ class SASPythonConverter:
         
     def _convert_libname(self, component: SASComponent) -> str:
         """Convert SAS LIBNAME statements to Python data paths."""
-        # Extract name and path
-        libname_match = re.search(r'LIBNAME\s+(\w+)\s+([^;]+);', component.content, re.IGNORECASE)
+        libname_match = re.search(r'LIBNAME\s+(\w+)\s+([^;]+)', component.content, re.IGNORECASE)
         
         if not libname_match:
             return f"# TODO: Complex LIBNAME conversion\n# {component.content}"
         
         lib_name = libname_match.group(1)
-        lib_path = libname_match.group(2).strip()
+        lib_path = libname_match.group(2).strip().strip("'\"")
         
-        code_lines = []
-        code_lines.append(f"# Define {lib_name} library path")
-        
-        # Handle different types of paths
-        if lib_path.startswith('"') or lib_path.startswith("'"):
-            # Regular path
-            code_lines.append(f"{lib_name.lower()}_path = {lib_path}")
-            code_lines.append(f"# For use with pandas:")
-            code_lines.append(f"# df = pd.read_csv(f'{{{lib_name.lower()}_path}}/dataset.csv')")
-        elif "oracle" in lib_path.lower():
-            # Oracle connection
-            oracle_match = re.search(r'oracle\s+path\s*=\s*[\'"]([^\'"]+)[\'"]', lib_path, re.IGNORECASE)
-            schema_match = re.search(r'schema\s*=\s*(\w+)', lib_path, re.IGNORECASE)
-            conn_string = oracle_match.group(1) if oracle_match else "oracle_connection"
-            schema = schema_match.group(1) if schema_match else "schema"
-            
-            code_lines.append(f"# Import database libraries")
-            code_lines.append(f"import sqlalchemy as sa")
-            code_lines.append(f"")
-            code_lines.append(f"# Create Oracle connection string")
-            code_lines.append(f"{lib_name.lower()}_conn = sa.create_engine('oracle://{conn_string}')")
-            code_lines.append(f"{lib_name.lower()}_schema = '{schema}'")
-            code_lines.append(f"# For use with pandas:")
-            code_lines.append(f"# df = pd.read_sql('SELECT * FROM table', {lib_name.lower()}_conn)")
-        else:
-            # Generic path
-            code_lines.append(f"{lib_name.lower()}_path = '{lib_path}'")
-        
-        # Extract options
-        if 'access=' in lib_path.lower():
-            code_lines.append(f"# Note: Read-only access specified")
-        if 'compress=' in lib_path.lower():
-            code_lines.append(f"# Note: Data compression specified")
+        code_lines = [
+            f"# Define {lib_name} library path",
+            f"{lib_name.lower()}_path = {repr(lib_path)}",
+            f"os.makedirs({lib_name.lower()}_path, exist_ok=True)",
+            "",
+            f"def read_{lib_name.lower()}_dataset(name: str) -> pd.DataFrame:",
+            f"    \"\"\"Read dataset from {lib_name} library.\"\"\"",
+            f"    try:",
+            f"        path = os.path.join({lib_name.lower()}_path, f'{{name}}.csv')",
+            f"        return pd.read_csv(path)",
+            f"    except Exception as e:",
+            f"        print(f'Error reading {{name}}: {{e}}')",
+            f"        return pd.DataFrame()"
+        ]
         
         return "\n".join(code_lines)
 
@@ -2060,7 +1947,7 @@ class SASPythonConverter:
         content = component.content.strip()
         
         code_lines = []
-        code_lines.append("# Configure Python environment options")
+        code_lines.append("# Configure pandas and display options")
         
         # Extract individual options
         options_match = re.search(r'OPTIONS\s+(.*?);', content, re.IGNORECASE)
@@ -2069,42 +1956,21 @@ class SASPythonConverter:
             options = [opt.strip() for opt in options_str.split()]
             
             for option in options:
-                if '=' in option:
-                    opt_name, opt_value = option.split('=', 1)
-                    
-                    # Handle specific options
-                    if opt_name.upper() in ['LINESIZE', 'LS']:
-                        code_lines.append(f"# Set display width")
-                        code_lines.append(f"pd.set_option('display.width', {opt_value})")
-                    elif opt_name.upper() in ['PAGESIZE', 'PS']:
-                        code_lines.append(f"# Set display max rows")
-                        code_lines.append(f"pd.set_option('display.max_rows', {opt_value})")
-                    elif opt_name.upper() == 'MISSING':
-                        code_lines.append(f"# Set missing value representation")
-                        code_lines.append(f"pd.set_option('display.missing_repr', {opt_value})")
-                    elif opt_name.upper() == 'NOCENTER':
-                        code_lines.append(f"# Disable center alignment")
-                    elif opt_name.upper() == 'NODATE':
-                        code_lines.append(f"# Disable date display")
-                    else:
-                        code_lines.append(f"# Option: {opt_name}={opt_value}")
-                else:
-                    # Handle flag options
-                    if option.upper() == 'COMPRESS=YES':
-                        code_lines.append(f"# Enable data compression")
-                    elif option.upper() == 'NOTES':
-                        code_lines.append(f"# Enable notes/logging")
-                        code_lines.append(f"import logging")
-                        code_lines.append(f"logging.basicConfig(level=logging.INFO)")
-                    elif option.upper() == 'NONOTES':
-                        code_lines.append(f"# Disable notes/logging")
-                        code_lines.append(f"import logging")
-                        code_lines.append(f"logging.basicConfig(level=logging.WARNING)")
-                    else:
-                        code_lines.append(f"# Option: {option}")
-        
-        if len(code_lines) == 1:
-            code_lines.append(f"# {content}")
+                if option.upper() == 'NOCENTER':
+                    code_lines.extend([
+                        "pd.set_option('display.expand_frame_repr', True)",
+                        "pd.set_option('display.max_columns', None)"
+                    ])
+                elif option.upper() == 'NODATE':
+                    code_lines.append("# Disable date display in output")
+                elif option.upper() == 'MISSING':
+                    code_lines.append("pd.set_option('display.missing_repr', '')")
+                elif '=' in option:
+                    name, value = option.split('=', 1)
+                    if name.upper() in ['LINESIZE', 'LS']:
+                        code_lines.append(f"pd.set_option('display.width', {value})")
+                    elif name.upper() in ['PAGESIZE', 'PS']:
+                        code_lines.append(f"pd.set_option('display.max_rows', {value})")
         
         return "\n".join(code_lines)
 
@@ -2115,17 +1981,119 @@ class SASPythonConverter:
             var_name = let_match.group(1)
             value = let_match.group(2).strip()
             
-            # Try to convert to number if possible
+            # Handle special cases
+            if value.startswith('%SCAN'):
+                return f"{var_name} = segment_list[i-1] if i-1 < len(segment_list) else \"\""
+            elif value.startswith('%EVAL'):
+                expr = value.replace('%EVAL', '').strip('()')
+                return f"{var_name} = {expr}"
+            
+            # Try numeric conversion
             try:
                 num_val = float(value)
                 if num_val.is_integer():
                     return f"{var_name} = {int(num_val)}"
                 return f"{var_name} = {num_val}"
             except ValueError:
-                # Handle string values
+                # String value
                 return f"{var_name} = '{value}'"
-            
+                
         return f"# ERROR: Could not convert %LET statement\n# {component.content}"
+
+    def _convert_proc_sgplot(self, component: SASComponent) -> str:
+        """Convert PROC SGPLOT to matplotlib/seaborn."""
+        code_lines = []
+        
+        # Extract dataset
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        dataset = data_match.group(1) if data_match else "df"
+        dataset = dataset.replace('sashelp.', '')  # Handle sashelp library
+        
+        # Extract plot type and variables
+        scatter_match = re.search(r'scatter\s+x\s*=\s*(\w+)\s+y\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        reg_match = re.search(r'reg\s+x\s*=\s*(\w+)\s+y\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        
+        code_lines.extend([
+            "# Create visualization",
+            "plt.figure(figsize=(10, 6))"
+        ])
+        
+        if scatter_match and reg_match:
+            x_var = scatter_match.group(1)
+            y_var = scatter_match.group(2)
+            code_lines.extend([
+                f"sns.regplot(data={dataset}_df, x='{x_var}', y='{y_var}',",
+                "    scatter_kws={'alpha': 0.5},",
+                "    line_kws={'color': 'red'})"
+            ])
+        elif scatter_match:
+            x_var = scatter_match.group(1)
+            y_var = scatter_match.group(2)
+            code_lines.append(f"sns.scatterplot(data={dataset}_df, x='{x_var}', y='{y_var}', alpha=0.5)")
+        elif reg_match:
+            x_var = reg_match.group(1)
+            y_var = reg_match.group(2)
+            code_lines.append(f"sns.regplot(data={dataset}_df, x='{x_var}', y='{y_var}', scatter=False, color='red')")
+        
+        # Add title and labels
+        code_lines.extend([
+            f"plt.xlabel('{x_var}')",
+            f"plt.ylabel('{y_var}')",
+            f"plt.title('{y_var} vs {x_var}')",
+            "plt.grid(True)",
+            "plt.tight_layout()",
+            "plt.show()"
+        ])
+        
+        return "\n".join(code_lines)
+
+    def _parse_aggregations(self, columns: str) -> Dict[str, str]:
+        """Parse SQL aggregation functions to pandas equivalents."""
+        aggs = {}
+        agg_matches = re.finditer(r'(\w+)\s*\(\s*(\w+)\s*\)', columns)
+        
+        # Map SAS SQL functions to pandas
+        agg_map = {
+            'COUNT': 'count',
+            'SUM': 'sum',
+            'AVG': 'mean',
+            'MEAN': 'mean',
+            'MIN': 'min',
+            'MAX': 'max',
+            'VAR': 'var',
+            'STD': 'std'
+        }
+        
+        for match in agg_matches:
+            func = match.group(1).upper()
+            col = match.group(2)
+            if func in agg_map:
+                aggs[col] = agg_map[func]
+        
+        return aggs
+
+    def _convert_ods_graphics(self, content: str) -> List[str]:
+        """Convert ODS GRAPHICS statements to matplotlib settings."""
+        code_lines = []
+        
+        if 'on' in content.lower():
+            code_lines.extend([
+                "# Configure matplotlib for high-quality output",
+                "plt.style.use('seaborn')",
+                "plt.rcParams['figure.figsize'] = (10, 6)",
+                "plt.rcParams['figure.dpi'] = 100",
+                "plt.rcParams['savefig.dpi'] = 300",
+                "plt.rcParams['font.size'] = 10",
+                "plt.rcParams['axes.titlesize'] = 12",
+                "plt.rcParams['axes.labelsize'] = 10"
+            ])
+        elif 'off' in content.lower():
+            code_lines.extend([
+                "# Close all plots",
+                "plt.close('all')"
+            ])
+        
+        return code_lines
 
 def main():
     """Command line interface for the converter."""
