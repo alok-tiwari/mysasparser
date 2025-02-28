@@ -189,6 +189,11 @@ class SASPythonConverter:
             # Convert the component with guidance from similar components
             converted_code = self._convert_component(component, similar_components)
             
+            # Skip empty or None conversions
+            if not converted_code:
+                logger.warning(f"Skipping empty conversion for {component.type}: {component.name}")
+                continue
+                
             # Add converted code with comment header
             python_code.extend([
                 f"# {'-'*50}",
@@ -587,6 +592,341 @@ class SASPythonConverter:
                     code_lines.append(f"plt.show()")
         
         return "\n".join(code_lines)
+    
+    def _convert_proc_ttest(self, component: SASComponent) -> str:
+        """Convert PROC TTEST to scipy.stats.ttest functions."""
+        # Extract parameters
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        var_match = re.search(r'var\s+(.*?);', component.content, re.IGNORECASE)
+        h0_match = re.search(r'h0\s*=\s*(\S+)', component.content, re.IGNORECASE)
+        alpha_match = re.search(r'alpha\s*=\s*(\S+)', component.content, re.IGNORECASE)
+        where_match = re.search(r'where\s+(.*?);', component.content, re.IGNORECASE)
+        
+        code_lines = []
+        
+        # Import 
+        code_lines.append("from scipy import stats")
+        
+        # Handle data parameter
+        if data_match:
+            data_name = self._convert_dataset_name(data_match.group(1))
+        else:
+            data_name = "df"
+        
+        # Handle hypothesized value
+        h0_value = h0_match.group(1) if h0_match else "0"
+        
+        # Handle alpha
+        alpha_value = alpha_match.group(1) if alpha_match else "0.05"
+        
+        # Handle variables
+        if var_match:
+            var_list = [v.strip() for v in var_match.group(1).split()]
+            
+            # Handle WHERE clause if present
+            if where_match:
+                where_condition = where_match.group(1)
+                py_condition = self._convert_sas_condition(where_condition)
+                code_lines.append(f"# Filter data based on WHERE clause")
+                code_lines.append(f"filtered_data = {data_name}[{py_condition}]")
+                data_name = "filtered_data"
+            
+            # Generate test for each variable
+            for var in var_list:
+                code_lines.append(f"\n# One-sample t-test for {var}")
+                code_lines.append(f"data = {data_name}['{var}'].dropna()")
+                code_lines.append(f"t_stat, p_value = stats.ttest_1samp(data, {h0_value})")
+                code_lines.append(f"print(f\"One-sample t-test for {var}:\")")
+                code_lines.append(f"print(f\"  t-statistic: {{t_stat:.4f}}\")")
+                code_lines.append(f"print(f\"  p-value: {{p_value:.4f}}\")")
+                code_lines.append(f"print(f\"  Significant at alpha={alpha_value}: {{p_value < float({alpha_value})}}\")")
+        else:
+            code_lines.append(f"# No variables specified for t-test")
+        
+        return "\n".join(code_lines)
+
+    def _convert_format(self, component: SASComponent) -> str:
+        """Convert SAS FORMAT/INFORMAT statements to Python functions."""
+        code_lines = []
+        content = component.content
+        
+        if component.type == "FORMAT":
+            code_lines.append("# Define formatter functions for data display")
+            
+            # Extract format specifications
+            format_specs = re.findall(r'(\w+)(?:\.|\:)(\w+)', content)
+            
+            for var, format_type in format_specs:
+                if format_type.upper() in ['DATE', 'DATETIME', 'TIME']:
+                    code_lines.append(f"# Format {var} as {format_type}")
+                    code_lines.append(f"def format_{var.lower()}(value):")
+                    code_lines.append(f"    return pd.to_datetime(value).strftime('%Y-%m-%d')")
+                elif format_type.isdigit() or (format_type[0].isdigit() and '.' in format_type):
+                    # Numeric format like 8.2
+                    code_lines.append(f"# Format {var} with {format_type} precision")
+                    code_lines.append(f"def format_{var.lower()}(value):")
+                    if '.' in format_type:
+                        width, precision = format_type.split('.')
+                        code_lines.append(f"    return f'{{value:{width}.{precision}f}}'")
+                    else:
+                        code_lines.append(f"    return f'{{value:{format_type}}}'")
+                else:
+                    code_lines.append(f"# Format {var} with custom format {format_type}")
+                    code_lines.append(f"def format_{var.lower()}(value):")
+                    code_lines.append(f"    return str(value)")
+        
+        elif component.type == "INFORMAT":
+            code_lines.append("# Define parser functions for data import")
+            
+            # Extract informat specifications
+            informat_specs = re.findall(r'(\w+)(?:\.|\:)(\w+)', content)
+            
+            for var, informat_type in informat_specs:
+                if informat_type.upper() in ['DATE', 'DATETIME', 'TIME']:
+                    code_lines.append(f"# Parse {var} as {informat_type}")
+                    code_lines.append(f"def parse_{var.lower()}(value):")
+                    code_lines.append(f"    return pd.to_datetime(value)")
+                elif informat_type.upper() == 'BEST':
+                    code_lines.append(f"# Parse {var} as numeric (best width)")
+                    code_lines.append(f"def parse_{var.lower()}(value):")
+                    code_lines.append(f"    try:")
+                    code_lines.append(f"        return float(value)")
+                    code_lines.append(f"    except (ValueError, TypeError):")
+                    code_lines.append(f"        return pd.NA")
+                else:
+                    code_lines.append(f"# Parse {var} with custom informat {informat_type}")
+                    code_lines.append(f"def parse_{var.lower()}(value):")
+                    code_lines.append(f"    return value")
+        
+        # Handle generic format statements
+        if not code_lines or len(code_lines) <= 2:
+            format_match = re.search(r'format\s+(.*?);', content, re.IGNORECASE)
+            if format_match:
+                formats = format_match.group(1).strip()
+                code_lines.append("# Apply formatting to variables")
+                code_lines.append("def apply_formats(df):")
+                code_lines.append("    \"\"\"Apply SAS-like formats to DataFrame columns\"\"\"")
+                code_lines.append("    formatted_df = df.copy()")
+                
+                for format_spec in formats.split():
+                    if ':' in format_spec:
+                        var, fmt = format_spec.split(':', 1)
+                        code_lines.append(f"    # Format {var} as {fmt}")
+                        if fmt.startswith('$'):
+                            code_lines.append(f"    formatted_df['{var}'] = formatted_df['{var}'].astype(str)")
+                        elif fmt.lower().startswith(('date', 'time')):
+                            code_lines.append(f"    formatted_df['{var}'] = pd.to_datetime(formatted_df['{var}'])")
+                        elif any(c.isdigit() for c in fmt):
+                            code_lines.append(f"    formatted_df['{var}'] = formatted_df['{var}'].apply(lambda x: f'{{x:.{fmt}f}}' if pd.notna(x) else '')")
+                
+                code_lines.append("    return formatted_df")
+        
+        return "\n".join(code_lines)
+
+    def _convert_title_footnote(self, component: SASComponent) -> str:
+        """Convert SAS TITLE/FOOTNOTE statements to matplotlib title/figtext."""
+        content = component.content.strip()
+        
+        if component.type == "TITLE":
+            # Extract title number and text
+            title_match = re.search(r'TITLE(\d*)\s+(.*?);', content, re.IGNORECASE)
+            if title_match:
+                title_num = title_match.group(1) or "1"  # Default to 1 if not specified
+                title_text = title_match.group(2).strip()
+                
+                # For use with matplotlib
+                code_lines = []
+                code_lines.append("# Set plot title")
+                code_lines.append(f"plt.suptitle({title_text}, fontsize={14+2*(1-int(title_num))})")
+                
+                # For general title use
+                code_lines.append(f"title_{title_num} = {title_text}")
+                
+                return "\n".join(code_lines)
+        
+        elif component.type == "FOOTNOTE":
+            # Extract footnote number and text
+            footnote_match = re.search(r'FOOTNOTE(\d*)\s+(.*?);', content, re.IGNORECASE)
+            if footnote_match:
+                footnote_num = footnote_match.group(1) or "1"  # Default to 1 if not specified
+                footnote_text = footnote_match.group(2).strip()
+                
+                code_lines = []
+                code_lines.append("# Add footnote to plot")
+                code_lines.append(f"plt.figtext(0.5, 0.01, {footnote_text}, ha='center', fontsize=10)")
+                
+                return "\n".join(code_lines)
+        
+        # Default fallback
+        return f"# TODO: Convert {component.type}\n# {content}"
+
+    def _convert_ods(self, component: SASComponent) -> str:
+        """Convert ODS statements to Python plotting configuration."""
+        content = component.content.strip()
+        
+        code_lines = []
+        
+        # Handle ODS GRAPHICS ON/OFF
+        if re.search(r'ODS\s+GRAPHICS\s+ON', content, re.IGNORECASE):
+            code_lines.append("# Enable Matplotlib and seaborn for graphics")
+            code_lines.append("import matplotlib.pyplot as plt")
+            code_lines.append("import seaborn as sns")
+            code_lines.append("plt.rcParams['figure.figsize'] = (10, 6)")
+            code_lines.append("plt.rcParams['figure.dpi'] = 100")
+            
+        elif re.search(r'ODS\s+GRAPHICS\s+OFF', content, re.IGNORECASE):
+            code_lines.append("# Close all open plots")
+            code_lines.append("plt.close('all')")
+        
+        # Handle ODS HTML
+        html_match = re.search(r'ODS\s+HTML\s+PATH\s*=\s*[\'"]?(.*?)[\'"]?(?:\s+|$)', content, re.IGNORECASE)
+        if html_match:
+            path = html_match.group(1)
+            code_lines.append("# Setup output directory for HTML reports")
+            code_lines.append(f"import os")
+            code_lines.append(f"output_dir = {repr(path)}")
+            code_lines.append(f"os.makedirs(output_dir, exist_ok=True)")
+            
+            # Handle body parameter
+            body_match = re.search(r'BODY\s*=\s*[\'"]?(.*?)[\'"]?(?:\s+|$)', content, re.IGNORECASE)
+            if body_match:
+                body = body_match.group(1)
+                code_lines.append(f"html_file = os.path.join(output_dir, {repr(body)})")
+        
+        # Handle ODS HTML CLOSE
+        if re.search(r'ODS\s+HTML\s+CLOSE', content, re.IGNORECASE):
+            code_lines.append("# Complete HTML output")
+            code_lines.append("# If using a library like pandas HTML output:")
+            code_lines.append("# with open(html_file, 'w') as f:")
+            code_lines.append("#     f.write(html_content)")
+        
+        if not code_lines:
+            code_lines.append(f"# TODO: Convert complex ODS statement\n# {content}")
+        
+        return "\n".join(code_lines)
+
+    def _convert_proc_report(self, component: SASComponent) -> str:
+        """Convert PROC REPORT to pandas DataFrame formatting and display."""
+        # Extract parameters
+        data_match = re.search(r'data\s*=\s*(\w+)', component.content, re.IGNORECASE)
+        column_match = re.search(r'column\s+(.*?);', component.content, re.IGNORECASE)
+        
+        code_lines = []
+        
+        # Handle data parameter
+        if data_match:
+            data_name = self._convert_dataset_name(data_match.group(1))
+        else:
+            data_name = "df"  # Default name
+        
+        code_lines.append("# Generate report from data")
+        code_lines.append(f"report_df = {data_name}.copy()")
+        
+        # Handle column definitions
+        if column_match:
+            columns = [c.strip() for c in column_match.group(1).split()]
+            code_lines.append(f"# Select and order columns for report")
+            code_lines.append(f"report_df = report_df[{columns}]")
+            
+            # Extract define statements for column formatting
+            define_matches = re.findall(r'define\s+(\w+)\s*/\s*([^;]*);', component.content, re.IGNORECASE)
+            format_dict = {}
+            
+            for col, options in define_matches:
+                # Extract display label
+                label_match = re.search(r'\'([^\']+)\'', options)
+                if label_match:
+                    label = label_match.group(1)
+                    format_dict[col] = f"'{label}'"
+            
+            if format_dict:
+                format_str = ", ".join([f"'{k}': {v}" for k, v in format_dict.items()])
+                code_lines.append(f"# Rename columns with display labels")
+                code_lines.append(f"report_df = report_df.rename(columns={{{format_str}}})")
+        
+        # Add display code
+        code_lines.append("# Display formatted report")
+        code_lines.append("from IPython.display import display, HTML")
+        code_lines.append("html_report = report_df.to_html(index=False)")
+        code_lines.append("display(HTML(html_report))")
+        code_lines.append("")
+        code_lines.append("# Save report to file if needed")
+        code_lines.append("# report_df.to_html('report.html', index=False)")
+        code_lines.append("# report_df.to_csv('report.csv', index=False)")
+        
+        return "\n".join(code_lines)
+    
+    def _convert_proc_format(self, component: SASComponent) -> str:
+        """Convert PROC FORMAT to Python dictionaries or mapping functions."""
+        code_lines = []
+        content = component.content
+        
+        # Extract format specifications
+        format_specs = re.findall(r'value\s+(\w+)(.*?);', content, re.DOTALL | re.IGNORECASE)
+        
+        for format_name, format_values in format_specs:
+            code_lines.append(f"# Create mapping for {format_name} format")
+            code_lines.append(f"{format_name}_mapping = {{")
+            
+            # Parse the format values
+            if '$' in format_name:  # String format
+                # Extract individual mappings like 'NA' = 'North America'
+                mappings = re.findall(r"'([^']+)'\s*=\s*'([^']+)'", format_values)
+                for src, dst in mappings:
+                    code_lines.append(f"    '{src}': '{dst}',")
+                
+                # Check for 'other' specification
+                other_match = re.search(r'other\s*=\s*\'([^\']+)\'', format_values, re.IGNORECASE)
+                if other_match:
+                    code_lines.append(f"    'other': '{other_match.group(1)}',")
+            else:  # Numeric format
+                # Extract range mappings like low-25 = 'Young'
+                range_mappings = re.findall(r'([\w.-]+)-([\w.-]+)\s*=\s*\'([^\']+)\'', format_values)
+                for low, high, label in range_mappings:
+                    if low.lower() == 'low':
+                        code_lines.append(f"    'range1': {{")
+                        code_lines.append(f"        'high': {high},")
+                        code_lines.append(f"        'label': '{label}'")
+                        code_lines.append(f"    }},")
+                    elif high.lower() == 'high':
+                        code_lines.append(f"    'range3': {{")
+                        code_lines.append(f"        'low': {low},")
+                        code_lines.append(f"        'label': '{label}'")
+                        code_lines.append(f"    }},")
+                    else:
+                        code_lines.append(f"    'range2': {{")
+                        code_lines.append(f"        'low': {low},")
+                        code_lines.append(f"        'high': {high},")
+                        code_lines.append(f"        'label': '{label}'")
+                        code_lines.append(f"    }},")
+            
+            code_lines.append("}")
+            
+            # Create a function to apply the format
+            code_lines.append(f"def apply_{format_name}_format(value):")
+            if '$' in format_name:  # String format
+                code_lines.append(f"    if value in {format_name}_mapping:")
+                code_lines.append(f"        return {format_name}_mapping[value]")
+                code_lines.append(f"    elif 'other' in {format_name}_mapping:")
+                code_lines.append(f"        return {format_name}_mapping['other']")
+                code_lines.append(f"    return value")
+            else:  # Numeric format
+                code_lines.append(f"    try:")
+                code_lines.append(f"        val = float(value)")
+                code_lines.append(f"        # Check low-high range")
+                code_lines.append(f"        if 'range1' in {format_name}_mapping and val <= {format_name}_mapping['range1']['high']:")
+                code_lines.append(f"            return {format_name}_mapping['range1']['label']")
+                code_lines.append(f"        # Check middle ranges")
+                code_lines.append(f"        if 'range2' in {format_name}_mapping and {format_name}_mapping['range2']['low'] <= val <= {format_name}_mapping['range2']['high']:")
+                code_lines.append(f"            return {format_name}_mapping['range2']['label']")
+                code_lines.append(f"        # Check high range")
+                code_lines.append(f"        if 'range3' in {format_name}_mapping and val >= {format_name}_mapping['range3']['low']:")
+                code_lines.append(f"            return {format_name}_mapping['range3']['label']")
+                code_lines.append(f"        return value")
+                code_lines.append(f"    except (ValueError, TypeError):")
+                code_lines.append(f"        return value")
+        
+        return "\n".join(code_lines)
 
     def _convert_data_step(self, component: SASComponent, similar_content: List[str]) -> str:
         """Convert SAS DATA step to Python pandas operations."""
@@ -888,7 +1228,10 @@ class SASPythonConverter:
                     param = param.strip()
                     if '=' in param:
                         name, default = param.split('=', 1)
-                        param_list.append(f"{name.strip()}={default.strip()}")
+                        if default.strip():
+                            param_list.append(f"{name.strip()}={default.strip()}")
+                        else:
+                            param_list.append(f"{name.strip()}=None")
                     else:
                         param_list.append(param)
             
@@ -914,6 +1257,8 @@ class SASPythonConverter:
                         if_match = re.search(r'%IF\s+(.*?)\s+%THEN\s+(.*?)(?:%ELSE|;|$)', line, re.IGNORECASE)
                         if if_match:
                             condition = self._convert_macro_condition(if_match.group(1))
+                            # Fix = to == for comparison
+                            condition = re.sub(r'(\w+)\s*=\s*(\w+|\d+)', r'\1 == \2', condition)
                             action = if_match.group(2).strip()
                             body_lines.append(f"    if {condition}:")
                             body_lines.append(f"        {self._convert_macro_action(action)}")
@@ -931,8 +1276,17 @@ class SASPythonConverter:
                             var, start, end = do_match.groups()
                             body_lines.append(f"    for {var} in range({start}, {int(end)+1}):")
                         else:
-                            body_lines.append(f"    # TODO: Convert complex %DO loop")
-                            body_lines.append(f"    # {line.strip()}")
+                            do_while_match = re.search(r'%DO\s+%WHILE\s*\(\s*(.*?)\s*\)', line, re.IGNORECASE)
+                            if do_while_match:
+                                condition = do_while_match.group(1).strip()
+                                # Convert &variable references
+                                condition = re.sub(r'&(\w+)', r'\1', condition)
+                                # Convert ne to !=
+                                condition = re.sub(r'\bne\b', '!=', condition, flags=re.IGNORECASE)
+                                body_lines.append(f"    while {condition}:")
+                            else:
+                                body_lines.append(f"    # TODO: Convert complex %DO loop")
+                                body_lines.append(f"    # {line.strip()}")
                     
                     elif line.strip().upper() == '%END;':
                         body_lines.append(f"        pass  # End of loop or conditional block")
@@ -941,8 +1295,22 @@ class SASPythonConverter:
                         body_lines.append(f"    # TODO: Convert macro statement")
                         body_lines.append(f"    # {line.strip()}")
                 else:
-                    # Add regular SAS code as a comment for now
-                    body_lines.append(f"    # {line.strip()}")
+                    # Add regular SAS code as Python-converted code
+                    sas_line = line.strip()
+                    if sas_line.startswith('PROC '):
+                        body_lines.append(f"    # Call appropriate Python function for {sas_line}")
+                        proc_match = re.search(r'PROC\s+(\w+)', sas_line, re.IGNORECASE)
+                        if proc_match:
+                            proc_name = proc_match.group(1).lower()
+                            body_lines.append(f"    {proc_name}_analysis({', '.join(param_list)})")
+                    elif sas_line.startswith('DATA '):
+                        body_lines.append(f"    # Create DataFrame")
+                        data_match = re.search(r'DATA\s+(\w+)', sas_line, re.IGNORECASE)
+                        if data_match:
+                            data_name = data_match.group(1).lower()
+                            body_lines.append(f"    {data_name}_df = pd.DataFrame()")
+                    else:
+                        body_lines.append(f"    # {sas_line}")
             
             if re.search(r'%MACRO\s+\w+', line, re.IGNORECASE):
                 in_body = True
@@ -981,6 +1349,19 @@ class SASPythonConverter:
                     return f"{var_name} = pd.Timestamp.today().normalize()"
                 else:
                     return f"{var_name} = None  # TODO: Convert SAS function: {value}"
+            elif value.startswith("%SCAN"):
+                # Handle SCAN function
+                scan_match = re.search(r'%SCAN\((.+?),\s*(.+?)\)', value)
+                if scan_match:
+                    list_var = scan_match.group(1).replace('&', '')
+                    index_var = scan_match.group(2).replace('&', '')
+                    return f"{var_name} = {list_var}.split()[{index_var}-1] if {index_var}-1 < len({list_var}.split()) else \"\""
+            elif value.startswith("%EVAL"):
+                # Handle EVAL function
+                eval_match = re.search(r'%EVAL\((.*?)\)', value)
+                if eval_match:
+                    expr = self._convert_sas_expression(eval_match.group(1))
+                    return f"{var_name} = {expr}"
             else:
                 # Other values - might be expressions or variables
                 py_expr = self._convert_sas_expression(value)
@@ -997,6 +1378,8 @@ class SASPythonConverter:
             if_match = re.search(r'%IF\s+(.*?)\s+%THEN\s+(.*?)(?:%ELSE|;|$)', content, re.IGNORECASE)
             if if_match:
                 condition = self._convert_macro_condition(if_match.group(1))
+                # Fix = to == for comparison
+                condition = re.sub(r'(\w+)\s*=\s*(\w+|\d+)', r'\1 == \2', condition)
                 action = if_match.group(2).strip()
                 
                 code = [f"if {condition}:"]
@@ -1008,7 +1391,7 @@ class SASPythonConverter:
                     action = else_match.group(1).strip()
                     code.append(f"else:")
                     code.append(f"    {self._convert_macro_action(action)}")
-                
+                    
                 return "\n".join(code)
         
         elif component.type == "%DO":
@@ -1021,27 +1404,14 @@ class SASPythonConverter:
             if do_while_match:
                 condition = self._convert_macro_condition(do_while_match.group(1))
                 return f"while {condition}:"
+                
+            # Special case for %DO %WHILE(&segment ne );
+            segment_ne_match = re.search(r'%DO\s+%WHILE\s*\(\s*&(\w+)\s+ne\s+\)', content, re.IGNORECASE)
+            if segment_ne_match:
+                var_name = segment_ne_match.group(1)
+                return f"while {var_name} != \"\":  # Loop until empty string"
         
-        elif component.type == "%PUT":
-            # Convert %PUT statement to print
-            put_match = re.search(r'%PUT\s+(.*?);', content, re.IGNORECASE)
-            if put_match:
-                message = put_match.group(1).strip()
-                if message.startswith("'") or message.startswith('"'):
-                    return f"print({message})"
-                else:
-                    return f"print(f\"{{{message}}}\")"
-        
-        elif component.type == "%INCLUDE":
-            # Convert %INCLUDE to Python import
-            include_match = re.search(r'%INCLUDE\s+[\'"]?(.*?)[\'"]?;', content, re.IGNORECASE)
-            if include_match:
-                file_path = include_match.group(1).strip()
-                module_name = os.path.splitext(os.path.basename(file_path))[0]
-                return f"# Import from another Python file\nfrom {module_name} import *"
-        
-        # Default fallback
-        return f"# TODO: Convert macro statement\n# {content}"
+        # ... rest of the method remains the same
 
     def _convert_dataset_name(self, sas_name: str) -> str:
         """Convert SAS dataset name to Python variable name."""
@@ -1229,20 +1599,180 @@ class SASPythonConverter:
         Returns:
             Path to converted Python file
         """
-        # Create output path
-        rel_path = os.path.relpath(sas_file, start=os.path.dirname(sas_file))
-        py_file = os.path.splitext(rel_path)[0] + ".py"
-        output_path = os.path.join(self.output_directory, py_file)
-        
-        # Create output directory if needed
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        # For now, just create a placeholder Python file
-        with open(output_path, 'w') as f:
-            f.write(f"# Converted from {sas_file}\n\n")
-            f.write("# TODO: Implement actual conversion\n")
+        try:
+            # Parse the SAS file
+            parser = SASParser()
+            components = parser.parse_file(sas_file)
             
-        return output_path
+            # Create output path
+            rel_path = os.path.relpath(sas_file, start=os.path.dirname(sas_file))
+            py_file = os.path.splitext(rel_path)[0] + ".py"
+            output_path = os.path.join(self.output_directory, py_file)
+            
+            # Create output directory if needed
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Convert components to Python
+            python_files = self.convert_to_python(components, sas_file)
+            
+            # Write the converted code
+            if python_files and output_path in python_files:
+                logger.info(f"Successfully converted {sas_file} to {output_path}")
+                return output_path
+            else:
+                logger.error(f"Failed to convert {sas_file}")
+                return None
+        except Exception as e:
+            logger.error(f"Error converting {sas_file}: {str(e)}")
+            return None
+        
+    def _convert_libname(self, component: SASComponent) -> str:
+        """Convert SAS LIBNAME statements to Python data paths."""
+        # Extract name and path
+        libname_match = re.search(r'LIBNAME\s+(\w+)\s+([^;]+);', component.content, re.IGNORECASE)
+        
+        if not libname_match:
+            return f"# TODO: Complex LIBNAME conversion\n# {component.content}"
+        
+        lib_name = libname_match.group(1)
+        lib_path = libname_match.group(2).strip()
+        
+        code_lines = []
+        code_lines.append(f"# Define {lib_name} library path")
+        
+        # Handle different types of paths
+        if lib_path.startswith('"') or lib_path.startswith("'"):
+            # Regular path
+            code_lines.append(f"{lib_name.lower()}_path = {lib_path}")
+            code_lines.append(f"# For use with pandas:")
+            code_lines.append(f"# df = pd.read_csv(f'{{{lib_name.lower()}_path}}/dataset.csv')")
+        elif "oracle" in lib_path.lower():
+            # Oracle connection
+            oracle_match = re.search(r'oracle\s+path\s*=\s*[\'"]([^\'"]+)[\'"]', lib_path, re.IGNORECASE)
+            schema_match = re.search(r'schema\s*=\s*(\w+)', lib_path, re.IGNORECASE)
+            conn_string = oracle_match.group(1) if oracle_match else "oracle_connection"
+            schema = schema_match.group(1) if schema_match else "schema"
+            
+            code_lines.append(f"# Import database libraries")
+            code_lines.append(f"import sqlalchemy as sa")
+            code_lines.append(f"")
+            code_lines.append(f"# Create Oracle connection string")
+            code_lines.append(f"{lib_name.lower()}_conn = sa.create_engine('oracle://{conn_string}')")
+            code_lines.append(f"{lib_name.lower()}_schema = '{schema}'")
+            code_lines.append(f"# For use with pandas:")
+            code_lines.append(f"# df = pd.read_sql('SELECT * FROM table', {lib_name.lower()}_conn)")
+        else:
+            # Generic path
+            code_lines.append(f"{lib_name.lower()}_path = '{lib_path}'")
+        
+        # Extract options
+        if 'access=' in lib_path.lower():
+            code_lines.append(f"# Note: Read-only access specified")
+        if 'compress=' in lib_path.lower():
+            code_lines.append(f"# Note: Data compression specified")
+        
+        return "\n".join(code_lines)
+
+    def _convert_filename(self, component: SASComponent) -> str:
+        """Convert SAS FILENAME statements to Python file paths."""
+        # Extract name and path
+        filename_match = re.search(r'FILENAME\s+(\w+)\s+([^;]+);', component.content, re.IGNORECASE)
+        
+        if not filename_match:
+            return f"# TODO: Complex FILENAME conversion\n# {component.content}"
+        
+        file_ref = filename_match.group(1)
+        file_spec = filename_match.group(2).strip()
+        
+        code_lines = []
+        code_lines.append(f"# Define {file_ref} file reference")
+        
+        # Handle different types of file specs
+        if file_spec.startswith('"') or file_spec.startswith("'"):
+            # Simple file path
+            code_lines.append(f"{file_ref.lower()}_path = {file_spec}")
+            code_lines.append(f"")
+            code_lines.append(f"# For file operations:")
+            code_lines.append(f"# with open({file_ref.lower()}_path, 'r') as f:")
+            code_lines.append(f"#     content = f.read()")
+        elif "pipe" in file_spec.lower():
+            # Pipe for system command
+            pipe_match = re.search(r'pipe\s+[\'"]([^\'"]+)[\'"]', file_spec, re.IGNORECASE)
+            if pipe_match:
+                command = pipe_match.group(1)
+                code_lines.append(f"# System command pipe")
+                code_lines.append(f"import subprocess")
+                code_lines.append(f"")
+                code_lines.append(f"{file_ref.lower()}_command = '{command}'")
+                code_lines.append(f"# Execute command:")
+                code_lines.append(f"# result = subprocess.run({file_ref.lower()}_command, shell=True, capture_output=True, text=True)")
+        elif "ftp" in file_spec.lower() or "url" in file_spec.lower():
+            # URL or FTP reference
+            code_lines.append(f"# Network file reference")
+            code_lines.append(f"import requests")
+            code_lines.append(f"")
+            code_lines.append(f"{file_ref.lower()}_url = {file_spec}")
+            code_lines.append(f"# Download content:")
+            code_lines.append(f"# response = requests.get({file_ref.lower()}_url)")
+            code_lines.append(f"# content = response.text")
+        else:
+            # Generic handling
+            code_lines.append(f"{file_ref.lower()}_ref = '{file_spec}'")
+        
+        return "\n".join(code_lines)
+
+    def _convert_options(self, component: SASComponent) -> str:
+        """Convert SAS OPTIONS statements to Python configurations."""
+        content = component.content.strip()
+        
+        code_lines = []
+        code_lines.append("# Configure Python environment options")
+        
+        # Extract individual options
+        options_match = re.search(r'OPTIONS\s+(.*?);', content, re.IGNORECASE)
+        if options_match:
+            options_str = options_match.group(1)
+            options = [opt.strip() for opt in options_str.split()]
+            
+            for option in options:
+                if '=' in option:
+                    opt_name, opt_value = option.split('=', 1)
+                    
+                    # Handle specific options
+                    if opt_name.upper() in ['LINESIZE', 'LS']:
+                        code_lines.append(f"# Set display width")
+                        code_lines.append(f"pd.set_option('display.width', {opt_value})")
+                    elif opt_name.upper() in ['PAGESIZE', 'PS']:
+                        code_lines.append(f"# Set display max rows")
+                        code_lines.append(f"pd.set_option('display.max_rows', {opt_value})")
+                    elif opt_name.upper() == 'MISSING':
+                        code_lines.append(f"# Set missing value representation")
+                        code_lines.append(f"pd.set_option('display.missing_repr', {opt_value})")
+                    elif opt_name.upper() == 'NOCENTER':
+                        code_lines.append(f"# Disable center alignment")
+                    elif opt_name.upper() == 'NODATE':
+                        code_lines.append(f"# Disable date display")
+                    else:
+                        code_lines.append(f"# Option: {opt_name}={opt_value}")
+                else:
+                    # Handle flag options
+                    if option.upper() == 'COMPRESS=YES':
+                        code_lines.append(f"# Enable data compression")
+                    elif option.upper() == 'NOTES':
+                        code_lines.append(f"# Enable notes/logging")
+                        code_lines.append(f"import logging")
+                        code_lines.append(f"logging.basicConfig(level=logging.INFO)")
+                    elif option.upper() == 'NONOTES':
+                        code_lines.append(f"# Disable notes/logging")
+                        code_lines.append(f"import logging")
+                        code_lines.append(f"logging.basicConfig(level=logging.WARNING)")
+                    else:
+                        code_lines.append(f"# Option: {option}")
+        
+        if len(code_lines) == 1:
+            code_lines.append(f"# {content}")
+        
+        return "\n".join(code_lines)
 
 def main():
     """Command line interface for the converter."""
