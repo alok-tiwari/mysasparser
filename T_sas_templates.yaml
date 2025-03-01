@@ -1,7 +1,17 @@
 # SAS to Python conversion templates
 
+import pandas as pd
+import numpy as np
+from scipy import stats
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+from typing import Any, List, Dict
+
+# Basic imports and setup
 imports:
-  default: |
+  template: |
     import pandas as pd
     import numpy as np
     from scipy import stats
@@ -13,36 +23,18 @@ imports:
 
 proc_means:
   template: |
-    # Calculate descriptive statistics
+    {% if dataset %}
+    # Calculate descriptive statistics for {{ dataset }}
+    {% if variables %}
+    stats_df = {{ dataset }}_df[{{ variables|join(', ') }}].describe()
+    {% else %}
+    stats_df = {{ dataset }}_df.describe()
+    {% endif %}
+    
     {% if maxdec %}
-    pd.set_option('display.float_format', lambda x: '{{0:.{maxdec}f}}'.format(x))
+    pd.set_option('display.float_format', lambda x: '{{:.{}f}}'.format(x).format(maxdec))
     {% endif %}
     
-    {% if by_vars %}
-    {% if nway %}
-    # NWAY option: only show statistics for each BY group combination
-    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}], dropna=False)
-    {% endif %}
-    {% if variables %}
-    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}])[{{variables|join_quotes}}].describe()
-    {% else %}
-    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}]).describe()
-    {% endif %}
-    stats_df = stats_df.reset_index()
-    {% else %}
-    {% if variables %}
-    stats_df = {{dataset}}_df[[{{variables|join_quotes}}]].describe()
-    {% else %}
-    stats_df = {{dataset}}_df.describe()
-    {% endif %}
-    {% endif %}
-    
-    {% if output %}
-    # Save statistics to new DataFrame
-    {{output}}_df = stats_df.copy()
-    {% endif %}
-    
-    {% if not noprint %}
     print('\nDescriptive Statistics:')
     print(stats_df)
     {% endif %}
@@ -168,156 +160,70 @@ proc_freq_extensions:
 
 proc_sort:
   template: |
-    # Sort dataset by {{by_vars|join(', ')}}
+    {% if dataset %}
+    # Sort {{ dataset }}
+    {% if by_vars %}
+    {{ dataset }}_df = {{ dataset }}_df.sort_values(
+        by=[{{ by_vars|join(', ') }}],
+        {% if ascending is defined %}ascending={{ ascending }}{% endif %}
+    )
+    
     {% if nodupkey %}
-    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
-    {{out_name}} = {{out_name}}.drop_duplicates(subset=[{{by_vars|join_quotes}}], keep='first')
-    {% elif nodup %}
-    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
-    {{out_name}} = {{out_name}}.drop_duplicates(keep='first')
-    {% else %}
-    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
+    {{ dataset }}_df = {{ dataset }}_df.drop_duplicates(subset=[{{ by_vars|join(', ') }}])
+    {% endif %}
+    
+    {% if nodup %}
+    {{ dataset }}_df = {{ dataset }}_df.drop_duplicates()
+    {% endif %}
+    {% endif %}
     {% endif %}
 
 proc_univariate:
   template: |
-    # Detailed statistical analysis
+    {% if dataset and variables %}
+    # Univariate analysis for {{ dataset }}
     from scipy import stats
-    import numpy as np
     
     {% for var in variables %}
-    print(f'\nDetailed Analysis for {{var}}:')
-    data = {{dataset}}_df['{{var}}'].dropna()
+    print(f"\nUnivariate analysis for {{ var }}:")
+    data = {{ dataset }}_df['{{ var }}'].dropna()
     
     # Basic statistics
     desc = data.describe()
-    print('\nBasic Statistics:')
+    print("\nDescriptive statistics:")
     print(desc)
     
     # Additional statistics
-    print('\nAdditional Statistics:')
-    print(f'Skewness: {stats.skew(data):.3f}')
-    print(f'Kurtosis: {stats.kurtosis(data):.3f}')
+    print("\nAdditional statistics:")
+    print(f"Skewness: {stats.skew(data):.4f}")
+    print(f"Kurtosis: {stats.kurtosis(data):.4f}")
     
-    # Location statistics
-    print('\nLocation Measures:')
-    print(f'Mode: {data.mode().iloc[0]:.3f}')
-    print(f'Median: {np.median(data):.3f}')
-    print(f'Mean: {np.mean(data):.3f}')
+    {% if plots %}
+    # Plots
+    import matplotlib.pyplot as plt
     
-    # Robust statistics
-    print('\nRobust Statistics:')
-    q1, q3 = np.percentile(data, [25, 75])
-    iqr = q3 - q1
-    print(f'IQR: {iqr:.3f}')
-    print(f'MAD: {stats.median_abs_deviation(data):.3f}')
+    plt.figure(figsize=(12, 4))
     
-    # Extreme observations
-    print('\nExtreme Observations:')
-    print('Lowest 5:')
-    print(data.nsmallest(5))
-    print('\nHighest 5:')
-    print(data.nlargest(5))
-    
-    # Additional quantiles
-    quantiles = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
-    print('\nQuantiles:')
-    for q in quantiles:
-        print(f'{q*100:>3.0f}%: {data.quantile(q):.3f}')
-    
-    # Tests for location
-    print('\nTests for Location:')
-    # Student's t-test (H0: mu = 0)
-    t_stat, t_pval = stats.ttest_1samp(data, 0)
-    print(f'Student t test:')
-    print(f't-statistic: {t_stat:.4f}')
-    print(f'p-value: {t_pval:.4f}')
-    
-    # Sign test
-    sign_stat, sign_pval = stats.wilcoxon(data)
-    print(f'\nSign test:')
-    print(f'statistic: {sign_stat:.4f}')
-    print(f'p-value: {sign_pval:.4f}')
-    
-    # Normality tests
-    print('\nTests for Normality:')
-    # Shapiro-Wilk test
-    w_stat, w_pval = stats.shapiro(data)
-    print(f'Shapiro-Wilk test:')
-    print(f'W-statistic: {w_stat:.4f}')
-    print(f'p-value: {w_pval:.4f}')
-    
-    # Kolmogorov-Smirnov test
-    ks_stat, ks_pval = stats.kstest(data, 'norm')
-    print(f'\nKolmogorov-Smirnov test:')
-    print(f'KS-statistic: {ks_stat:.4f}')
-    print(f'p-value: {ks_pval:.4f}')
-    
-    # Visualization
-    plt.figure(figsize=(12, 8))
-    
-    # Histogram with density
-    plt.subplot(221)
-    sns.histplot(data, kde=True)
-    plt.title('Distribution')
+    # Histogram
+    plt.subplot(131)
+    data.hist(bins=30)
+    plt.title('Histogram')
     
     # Box plot
-    plt.subplot(222)
-    sns.boxplot(y=data)
+    plt.subplot(132)
+    plt.boxplot(data)
     plt.title('Box Plot')
     
     # Q-Q plot
-    plt.subplot(223)
-    stats.probplot(data, dist='norm', plot=plt)
+    plt.subplot(133)
+    stats.probplot(data, dist="norm", plot=plt)
     plt.title('Q-Q Plot')
-    
-    # Stem-and-leaf plot (text-based)
-    plt.subplot(224)
-    plt.axis('off')
-    stem_leaf = stats.stem_leaf_plot(data)
-    plt.text(0.1, 0.5, str(stem_leaf), family='monospace')
-    plt.title('Stem-and-Leaf Plot')
     
     plt.tight_layout()
     plt.show()
-    
-    # Additional robust statistics
-    def calculate_trimmed_stats(data, trim_percent=10):
-        """Calculate trimmed statistics."""
-        from scipy.stats import trim_mean
-        trim_prop = trim_percent / 100
-        trimmed_mean = trim_mean(data, trim_prop)
-        
-        # Calculate Winsorized mean
-        lower = np.percentile(data, trim_percent)
-        upper = np.percentile(data, 100 - trim_percent)
-        winsorized = np.clip(data, lower, upper)
-        winsorized_mean = np.mean(winsorized)
-        
-        return {
-            'trimmed_mean': trimmed_mean,
-            'winsorized_mean': winsorized_mean
-        }
-    
-    def calculate_quantile_ci(data, q=0.5, alpha=0.05):
-        """Calculate confidence intervals for quantiles."""
-        n = len(data)
-        j = int(n * q - 1.96 * np.sqrt(n * q * (1 - q)))
-        k = int(n * q + 1.96 * np.sqrt(n * q * (1 - q)))
-        sorted_data = np.sort(data)
-        return sorted_data[max(0, j)], sorted_data[min(n-1, k)]
-    
-    robust_stats = calculate_trimmed_stats(data)
-    print('\nRobust Statistics:')
-    print(f'10% Trimmed Mean: {robust_stats["trimmed_mean"]:.3f}')
-    print(f'10% Winsorized Mean: {robust_stats["winsorized_mean"]:.3f}')
-    
-    # Confidence intervals for quantiles
-    print('\nQuantile Confidence Intervals (95%):')
-    for q in [0.25, 0.5, 0.75]:
-        ci_lower, ci_upper = calculate_quantile_ci(data, q)
-        print(f'{q*100}th Percentile: ({ci_lower:.3f}, {ci_upper:.3f})')
+    {% endif %}
     {% endfor %}
+    {% endif %}
 
 proc_ttest:
   template: |
@@ -405,268 +311,95 @@ proc_ttest:
 
 proc_reg:
   template: |
-    # Enhanced regression analysis with model selection and diagnostics
+    {% if dataset and dependent and independent %}
+    # Linear regression analysis
     from sklearn.linear_model import LinearRegression
-    from sklearn.feature_selection import RFE
     from sklearn.metrics import r2_score, mean_squared_error
-    import statsmodels.api as sm
     import numpy as np
     
-    class ModelSelection:
-        def __init__(self, X, y):
-            self.X = X
-            self.y = y
-            self.n = len(y)
-            self.p = X.shape[1]
-        
-        def forward_selection(self, significance_level=0.05):
-            """Forward stepwise selection."""
-            selected = []
-            remaining = list(range(self.p))
-            
-            while remaining:
-                best_pvalue = float('inf')
-                best_feature = None
-                
-                for feature in remaining:
-                    candidates = selected + [feature]
-                    X_subset = self.X[:, candidates]
-                    model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
-                    pvalues = model.pvalues[1:]  # Exclude constant
-                    max_pvalue = max(pvalues)
-                    
-                    if max_pvalue < best_pvalue:
-                        best_pvalue = max_pvalue
-                        best_feature = feature
-                
-                if best_pvalue < significance_level:
-                    selected.append(best_feature)
-                    remaining.remove(best_feature)
-                else:
-                    break
-                    
-            return selected
-        
-        def backward_selection(self, significance_level=0.05):
-            """Backward stepwise selection."""
-            selected = list(range(self.p))
-            
-            while selected:
-                X_subset = self.X[:, selected]
-                model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
-                pvalues = model.pvalues[1:]  # Exclude constant
-                max_pvalue = max(pvalues)
-                
-                if max_pvalue >= significance_level:
-                    worst_feature = selected[pvalues.argmax()]
-                    selected.remove(worst_feature)
-                else:
-                    break
-                    
-            return selected
-        
-        def stepwise_selection(self, significance_level=0.05):
-            """Stepwise selection (forward with backward elimination)."""
-            selected = []
-            remaining = list(range(self.p))
-            
-            while remaining:
-                # Forward step
-                best_pvalue = float('inf')
-                best_feature = None
-                
-                for feature in remaining:
-                    candidates = selected + [feature]
-                    X_subset = self.X[:, candidates]
-                    model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
-                    pvalues = model.pvalues[1:]
-                    max_pvalue = max(pvalues)
-                    
-                    if max_pvalue < best_pvalue:
-                        best_pvalue = max_pvalue
-                        best_feature = feature
-                
-                if best_pvalue < significance_level:
-                    selected.append(best_feature)
-                    remaining.remove(best_feature)
-                    
-                    # Backward step
-                    while True:
-                        X_subset = self.X[:, selected]
-                        model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
-                        pvalues = model.pvalues[1:]
-                        max_pvalue = max(pvalues)
-                        
-                        if max_pvalue >= significance_level:
-                            worst_feature = selected[pvalues.argmax()]
-                            selected.remove(worst_feature)
-                            remaining.append(worst_feature)
-                        else:
-                            break
-                else:
-                    break
-                    
-            return selected
+    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
+    y = {{ dataset }}_df['{{ dependent }}']
     
-    # Prepare data
-    X = {{dataset}}_df[{{predictors|join_quotes}}]
-    y = {{dataset}}_df['{{target}}']
+    model = LinearRegression()
+    model.fit(X, y)
     
-    # Model selection if specified
-    {% if selection_method %}
-    selector = ModelSelection(X.values, y.values)
-    if '{{selection_method}}' == 'forward':
-        selected_features = selector.forward_selection()
-    elif '{{selection_method}}' == 'backward':
-        selected_features = selector.backward_selection()
-    else:  # stepwise
-        selected_features = selector.stepwise_selection()
+    # Print results
+    print("\nRegression Results:")
+    print("\nCoefficients:")
+    for var, coef in zip([{{ independent|join(', ') }}], model.coef_):
+        print(f"{var}: {coef:.4f}")
+    print(f"\nIntercept: {model.intercept_:.4f}")
+    print(f"R-squared: {model.score(X, y):.4f}")
     
-    # Update predictors based on selection
-    selected_predictors = [X.columns[i] for i in selected_features]
-    X = X[selected_predictors]
-    print('\nSelected Features:')
-    print(selected_predictors)
-    {% endif %}
+    # Predictions and residuals
+    y_pred = model.predict(X)
+    residuals = y - y_pred
     
-    # Fit final model
-    model = sm.OLS(y, sm.add_constant(X)).fit()
+    {% if plots %}
+    import matplotlib.pyplot as plt
     
-    # Basic statistics
-    print('\nModel Summary:')
-    print(model.summary())
+    plt.figure(figsize=(12, 4))
     
-    # Advanced diagnostics
-    def calculate_influence_stats(model):
-        """Calculate influence statistics."""
-        influence = model.get_influence()
-        
-        # DFBETAS
-        dfbetas = influence.dfbetas
-        print('\nDFBETAS Summary:')
-        for i, var in enumerate(['const'] + X.columns.tolist()):
-            print(f'{var}:')
-            print(f'  Max: {dfbetas[:, i].max():.4f}')
-            print(f'  Min: {dfbetas[:, i].min():.4f}')
-        
-        # DFFITS
-        dffits = influence.dffits
-        print('\nDFFITS Summary:')
-        print(f'Max: {dffits.max():.4f}')
-        print(f'Min: {dffits.min():.4f}')
-        
-        # Cook's Distance
-        cooks_d = influence.cooks_distance[0]
-        print('\nCook\'s Distance Summary:')
-        print(f'Max: {cooks_d.max():.4f}')
-        print(f'Mean: {cooks_d.mean():.4f}')
-        
-        return dfbetas, dffits, cooks_d
+    # Actual vs Predicted
+    plt.subplot(121)
+    plt.scatter(y, y_pred)
+    plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
+    plt.xlabel('Actual')
+    plt.ylabel('Predicted')
+    plt.title('Actual vs Predicted')
     
-    def calculate_collinearity_diagnostics(X):
-        """Calculate collinearity diagnostics."""
-        # Correlation matrix
-        corr_matrix = X.corr()
-        
-        # Variance Inflation Factors
-        X_with_const = sm.add_constant(X)
-        vif_data = pd.DataFrame()
-        vif_data["Variable"] = X_with_const.columns
-        vif_data["VIF"] = [variance_inflation_factor(X_with_const.values, i) 
-                          for i in range(X_with_const.shape[1])]
-        
-        # Condition number
-        eigenvals = np.linalg.eigvals(X_with_const.T.dot(X_with_const))
-        condition_number = np.sqrt(max(eigenvals) / min(eigenvals))
-        
-        return corr_matrix, vif_data, condition_number
-    
-    # Calculate and print diagnostics
-    print('\nInfluence Statistics:')
-    dfbetas, dffits, cooks_d = calculate_influence_stats(model)
-    
-    print('\nCollinearity Diagnostics:')
-    corr_matrix, vif_data, condition_number = calculate_collinearity_diagnostics(X)
-    print('\nCorrelation Matrix:')
-    print(corr_matrix)
-    print('\nVariance Inflation Factors:')
-    print(vif_data)
-    print(f'\nCondition Number: {condition_number:.4f}')
-    
-    # Diagnostic plots
-    plt.figure(figsize=(15, 10))
-    
-    # Residuals vs Fitted
-    plt.subplot(221)
-    plt.scatter(model.fittedvalues, model.resid)
+    # Residual plot
+    plt.subplot(122)
+    plt.scatter(y_pred, residuals)
     plt.axhline(y=0, color='r', linestyle='--')
-    plt.xlabel('Fitted values')
+    plt.xlabel('Predicted')
     plt.ylabel('Residuals')
-    plt.title('Residuals vs Fitted')
-    
-    # Q-Q plot
-    plt.subplot(222)
-    stats.probplot(model.resid, dist="norm", plot=plt)
-    plt.title('Normal Q-Q')
-    
-    # Scale-Location
-    plt.subplot(223)
-    plt.scatter(model.fittedvalues, np.sqrt(np.abs(model.resid)))
-    plt.xlabel('Fitted values')
-    plt.ylabel('√|Residuals|')
-    plt.title('Scale-Location')
-    
-    # Cook's distance
-    plt.subplot(224)
-    plt.stem(range(len(cooks_d)), cooks_d, markerfmt=',')
-    plt.axhline(y=4/len(y), color='r', linestyle='--', label='Threshold')
-    plt.xlabel('Obs. number')
-    plt.ylabel("Cook's distance")
-    plt.title("Cook's Distance")
-    plt.legend()
+    plt.title('Residual Plot')
     
     plt.tight_layout()
     plt.show()
+    {% endif %}
+    {% endif %}
 
 proc_corr:
   template: |
-    # Calculate correlations
-    {% if variables %}
-    corr_matrix = {{dataset}}_df[[{{variables|join_quotes}}]].corr()
-    print('\nCorrelation Matrix:')
-    print(corr_matrix)
+    {% if dataset and variables %}
+    # Correlation analysis for {{ dataset }}
+    corr_df = {{ dataset }}_df[[{{ variables|join(', ') }}]].corr()
     
-    # Create correlation heatmap
+    print("\nCorrelation Matrix:")
+    print(corr_df)
+    
+    {% if plots %}
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    
     plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0)
+    sns.heatmap(corr_df, annot=True, cmap='coolwarm', center=0)
     plt.title('Correlation Heatmap')
-    plt.tight_layout()
     plt.show()
+    {% endif %}
     {% endif %}
 
 data_step:
   template: |
-    # Data step operations
+    {% if output_dataset %}
+    # Create new dataset {{ output_dataset }}
     {% if input_dataset %}
-    {{output_dataset}}_df = {{input_dataset}}_df.copy()
+    {{ output_dataset }}_df = {{ input_dataset }}_df.copy()
     {% else %}
-    {{output_dataset}}_df = pd.DataFrame()
+    {{ output_dataset }}_df = pd.DataFrame()
     {% endif %}
     
     {% if where_clause %}
-    {{output_dataset}}_df = {{output_dataset}}_df[{{where_clause}}]
+    {{ output_dataset }}_df = {{ output_dataset }}_df[{{ where_clause }}]
     {% endif %}
     
-    {% if drop_vars %}
-    {{output_dataset}}_df = {{output_dataset}}_df.drop(columns=[{{drop_vars|join_quotes}}])
+    {% if assignments %}
+    {% for assignment in assignments %}
+    {{ output_dataset }}_df['{{ assignment.variable }}'] = {{ assignment.expression }}
+    {% endfor %}
     {% endif %}
-    
-    {% if keep_vars %}
-    {{output_dataset}}_df = {{output_dataset}}_df[[{{keep_vars|join_quotes}}]]
-    {% endif %}
-    
-    {% if rename_dict %}
-    {{output_dataset}}_df = {{output_dataset}}_df.rename(columns={{rename_dict}})
     {% endif %}
 
   by_group_processing:
@@ -725,100 +458,188 @@ data_step:
                       skiprows=self.options.get('skiprows', 0)
                   )
 
-sql:
+proc_sql:
   template: |
-    # SQL operations
-    {% for stmt in statements %}
-    {% if stmt.type == 'select' %}
-    # SELECT statement
-    {% if stmt.joins %}
-    # Handle JOINs
-    {% for join in stmt.joins %}
-    {% if loop.first %}
-    result_df = {{join.left_table}}_df.merge(
-        {{join.right_table}}_df,
-        how='{{join.type}}',
-        left_on=[{{join.left_keys|join_quotes}}],
-        right_on=[{{join.right_keys|join_quotes}}]
-    )
-    {% else %}
-    result_df = result_df.merge(
-        {{join.right_table}}_df,
-        how='{{join.type}}',
-        left_on=[{{join.left_keys|join_quotes}}],
-        right_on=[{{join.right_keys|join_quotes}}]
-    )
-    {% endif %}
-    {% endfor %}
-    {% else %}
-    result_df = {{stmt.table_df}}
+    {% if select %}
+    # SQL query
+    result_df = {{ from_dataset }}_df.copy()
+    
+    {% if where %}
+    result_df = result_df[{{ where }}]
     {% endif %}
     
-    {% if stmt.where_clause %}
-    result_df = result_df[{{stmt.where_clause}}]
+    {% if columns %}
+    result_df = result_df[{{ columns|join(', ') }}]
     {% endif %}
     
-    {% if stmt.group_by %}
-    result_df = result_df.groupby([{{stmt.group_by_list|join_quotes}}])
-    {% if stmt.agg_funcs %}
-    result_df = result_df.agg({{stmt.agg_funcs}})
-    {% endif %}
-    {% endif %}
-    
-    {% if stmt.having %}
-    result_df = result_df[{{stmt.having}}]
-    {% endif %}
-    
-    {% if stmt.order_by %}
+    {% if order_by %}
     result_df = result_df.sort_values(
-        [{{stmt.sort_cols_list|join_quotes}}],
-        ascending=[{{stmt.ascending_list|join(', ')}}]
+        by={{ order_by.columns|join(', ') }},
+        ascending={{ order_by.ascending|default(True) }}
     )
     {% endif %}
-    
-    {% if stmt.window_funcs %}
-    # Apply window functions
-    {% for window in stmt.window_funcs %}
-    result_df['{{window.name}}'] = result_df.groupby([{{window.partition_by|join_quotes}}])[{{window.column}}].transform('{{window.func}}')
-    {% endfor %}
     {% endif %}
-    
-    {% elif stmt.type == 'create_table' %}
-    # CREATE TABLE statement
-    {{stmt.output_table_df}} = result_df.copy()
-    {% endif %}
-    {% endfor %}
 
 libname:
   template: |
-    # Define library path
-    {{lib_name}}_path = {{lib_path|repr}}
-    os.makedirs({{lib_name}}_path, exist_ok=True)
+    # Library definition for {{ libname }}
+    {{ libname }}_path = "{{ path }}"
+    {% if options %}
+    # Options: {{ options|join(', ') }}
+    {% endif %}
     
-    def read_{{lib_name}}_dataset(name: str) -> pd.DataFrame:
-        """Read dataset from {{lib_name}} library."""
-        try:
-            path = os.path.join({{lib_name}}_path, f'{name}.csv')
-            return pd.read_csv(path)
-        except Exception as e:
-            print(f'Error reading {name}: {e}')
-            return pd.DataFrame()
+    if not os.path.exists({{ libname }}_path):
+        os.makedirs({{ libname }}_path)
 
+filename:
+  template: |
+    # File reference for {{ fileref }}
+    {{ fileref }}_path = "{{ path }}"
+    {% if options %}
+    # Options: {{ options|join(', ') }}
+    {% endif %}
+
+# Global Settings
+options:
+  template: |
+    # SAS Global Options
+    import pandas as pd
+    import numpy as np
+    
+    # Set display options
+    pd.set_option('display.max_rows', {{ max_rows|default(None) }})
+    pd.set_option('display.max_columns', {{ max_columns|default(None) }})
+    {% if format %}
+    pd.set_option('display.float_format', lambda x: '{{ format }}'.format(x))
+    {% endif %}
+
+# Macro System
+macro_variable:
+  template: |
+    # Define macro variable {{ name }}
+    {{ name }} = {{ value }}
+    {% if global %}
+    globals()['{{ name }}'] = {{ value }}
+    {% endif %}
+
+macro_definition:
+  template: |
+    def {{ name }}({{ parameters|join(', ') }}):
+        """{{ description|default('SAS Macro Implementation') }}"""
+        {% if error_handling %}
+        try:
+        {% endif %}
+            {{ content|indent(4) }}
+        {% if error_handling %}
+        except Exception as e:
+            print(f"Error in macro {{ name }}: {str(e)}")
+            return None
+        {% endif %}
+
+# Graphics System
+graphics_setup:
+  template: |
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Reset graphics settings
+    plt.rcdefaults()
+    
+    # Set style and figure size
+    plt.style.use('{{ style|default("default") }}')
+    plt.figure(figsize=({{ width|default(10) }}, {{ height|default(6) }}))
+
+title_footnote:
+  template: |
+    {% if title %}
+    plt.title("{{ title }}")
+    {% endif %}
+    
+    {% if footnote %}
+    plt.figtext(0.99, 0.01, "{{ footnote }}", 
+                horizontalalignment='right', 
+                style='italic', 
+                size=8)
+    {% endif %}
+
+axis_definition:
+  template: |
+    # Axis settings for {{ axis_name }}
+    plt.{{ axis }}axis(
+        label="{{ label }}",
+        {% if limits %}
+        limits=[{{ limits|join(', ') }}],
+        {% endif %}
+        {% if ticks %}
+        ticks=[{{ ticks|join(', ') }}],
+        {% endif %}
+    )
+
+proc_gchart:
+  template: |
+    {% if dataset and chart_type %}
+    # Create {{ chart_type }} chart
+    plt.figure(figsize=({{ width|default(10) }}, {{ height|default(6) }}))
+    
+    {% if chart_type == 'vbar' %}
+    sns.barplot(
+        data={{ dataset }}_df,
+        x='{{ x_var }}',
+        y='{{ y_var }}'
+        {% if group %}, hue='{{ group }}'{% endif %}
+        {% if stat %}, estimator='{{ stat }}'{% endif %}
+    )
+    {% endif %}
+    
+    plt.xticks(rotation={{ rotation|default(45) }})
+    plt.tight_layout()
+    {% endif %}
+
+# Format System
+proc_format:
+  template: |
+    # Create format dictionary for {{ format_name }}
+    {{ format_name }}_format = {
+    {% for range, label in ranges.items() %}
+        {{ range }}: "{{ label }}"{% if not loop.last %},{% endif %}
+    {% endfor %}
+    }
+    
+    {% if apply_to %}
+    # Apply format to data
+    {{ dataset }}_df['{{ apply_to }}'] = {{ dataset }}_df['{{ apply_to }}'].map({{ format_name }}_format)
+    {% endif %}
+
+# Hash Table Operations
+hash_table:
+  template: |
+    # Create hash table (lookup dictionary)
+    {{ hash_name }}_lookup = {{ dataset }}_df.set_index('{{ key_var }}')
+    
+    {% if data_vars %}
+    {{ hash_name }}_lookup = {{ hash_name }}_lookup[{{ data_vars|join(', ') }}].to_dict('index')
+    {% endif %}
+    
+    def lookup_{{ hash_name }}(key):
+        """Lookup values in {{ hash_name }} hash table."""
+        return {{ hash_name }}_lookup.get(key, None)
+
+# ODS Output
 ods:
   template: |
-    {% if graphics %}
-    # Configure matplotlib for high-quality output
-    plt.style.use('seaborn')
-    plt.rcParams.update({
-        'figure.figsize': (10, 6),
-        'figure.dpi': 100,
-        'savefig.dpi': 300,
-        'font.size': 10,
-        'axes.titlesize': 12,
-        'axes.labelsize': 10,
-        'axes.grid': True
-    })
-    sns.set_theme(style='whitegrid')
+    # ODS output configuration
+    import matplotlib.pyplot as plt
+    {% if style %}
+    plt.style.use('{{ style }}')
+    {% endif %}
+    
+    {% if path %}
+    output_path = "{{ path }}"
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    {% endif %}    
+    {% if format == 'html' %}
+    from IPython.display import HTML
     {% endif %}
 
 # Add more templates for other PROC types...
@@ -2212,74 +2033,31 @@ format_extensions_complete:
 error_handling_system:
   template: |
     class SASErrorHandler:
-        """Complete error handling and validation system."""
         def __init__(self):
             self.errors = []
             self.warnings = []
             self.notes = []
-            self.log_file = None
         
-        def set_log_file(self, path: str):
-            """Set log file path."""
-            self.log_file = path
-            with open(path, 'w') as f:
-                f.write("SAS to Python Conversion Log\n")
-                f.write("=" * 50 + "\n\n")
-        
-        def add_error(self, component: str, message: str, details: Dict = None):
-            """Add error message."""
-            error = {
-                'timestamp': datetime.now(),
+        def add_error(self, component, message, details=None):
+            self.errors.append({
                 'component': component,
                 'message': message,
                 'details': details or {}
-            }
-            self.errors.append(error)
-            self._write_to_log('ERROR', error)
+            })
         
-        def add_warning(self, component: str, message: str, details: Dict = None):
-            """Add warning message."""
-            warning = {
-                'timestamp': datetime.now(),
+        def add_warning(self, component, message, details=None):
+            self.warnings.append({
                 'component': component,
                 'message': message,
                 'details': details or {}
-            }
-            self.warnings.append(warning)
-            self._write_to_log('WARNING', warning)
+            })
         
-        def add_note(self, component: str, message: str, details: Dict = None):
-            """Add informational note."""
-            note = {
-                'timestamp': datetime.now(),
+        def add_note(self, component, message, details=None):
+            self.notes.append({
                 'component': component,
                 'message': message,
                 'details': details or {}
-            }
-            self.notes.append(note)
-            self._write_to_log('NOTE', note)
-        
-        def _write_to_log(self, level: str, message: Dict):
-            """Write message to log file."""
-            if self.log_file:
-                with open(self.log_file, 'a') as f:
-                    f.write(f"{message['timestamp']} - {level}: {message['component']}\n")
-                    f.write(f"  {message['message']}\n")
-                    if message['details']:
-                        f.write(f"  Details: {message['details']}\n")
-                    f.write("\n")
-        
-        def get_summary(self) -> Dict[str, int]:
-            """Get summary of messages."""
-            return {
-                'errors': len(self.errors),
-                'warnings': len(self.warnings),
-                'notes': len(self.notes)
-            }
-        
-        def has_errors(self) -> bool:
-            """Check if there are any errors."""
-            return len(self.errors) > 0
+            })
 
     class SASValidator:
         """Validation rules for SAS components."""
@@ -2394,39 +2172,30 @@ utility_functions:
             return (soundex + '0' * 4)[:4]
 
 proc_dataset_operations:
-  template: |
-    class DatasetOperations:
-        """Handle dataset operations like PROC DATASETS."""
-        @staticmethod
-        def append(base_df: pd.DataFrame, data_df: pd.DataFrame, force: bool = False) -> pd.DataFrame:
-            """Append datasets like PROC APPEND."""
-            if not force and not set(data_df.columns).issubset(set(base_df.columns)):
-                raise ValueError("Data columns don't match base columns")
-            return pd.concat([base_df, data_df[base_df.columns]], ignore_index=True)
-        
-        @staticmethod
-        def modify(df: pd.DataFrame, modifications: List[Dict]) -> pd.DataFrame:
-            """Modify dataset attributes."""
-            result = df.copy()
-            for mod in modifications:
-                if mod['type'] == 'rename':
-                    result = result.rename(columns=mod['mapping'])
-                elif mod['type'] == 'label':
-                    # Store labels in dataframe attributes
-                    result.attrs['labels'] = result.attrs.get('labels', {})
-                    result.attrs['labels'].update(mod['labels'])
-                elif mod['type'] == 'format':
-                    result.attrs['formats'] = result.attrs.get('formats', {})
-                    result.attrs['formats'].update(mod['formats'])
-            return result
-        
-        @staticmethod
-        def delete(lib_path: str, dataset_names: List[str]) -> None:
-            """Delete datasets."""
-            for name in dataset_names:
-                path = os.path.join(lib_path, f"{name}.csv")
-                if os.path.exists(path):
-                    os.remove(path)
+  append:
+    template: |
+      {% if base_df and data_df %}
+      # Append datasets
+      result_df = pd.concat([{{ base_df }}, {{ data_df }}[{{ base_df }}.columns]], ignore_index=True)
+      {% endif %}
+
+  modify:
+    template: |
+      {% if df and modifications %}
+      # Modify dataset
+      result_df = {{ df }}.copy()
+      {% for mod in modifications %}
+      {% if mod.type == 'rename' %}
+      result_df = result_df.rename(columns={{ mod.mapping }})
+      {% elif mod.type == 'label' %}
+      result_df.attrs['labels'] = result_df.attrs.get('labels', {})
+      result_df.attrs['labels'].update({{ mod.labels }})
+      {% elif mod.type == 'format' %}
+      result_df.attrs['formats'] = result_df.attrs.get('formats', {})
+      result_df.attrs['formats'].update({{ mod.formats }})
+      {% endif %}
+      {% endfor %}
+      {% endif %}
 
 macro_variable_processing:
   template: |
@@ -2510,3 +2279,697 @@ output_handling_enhanced:
             else:
                 with open(path, 'w') as f:
                     f.write(str(content))
+
+# Add these new templates
+
+# PROC TRANSPOSE template
+proc_transpose:
+  template: |
+    {% if dataset %}
+    # Transpose {{ dataset }}
+    {% if by_vars %}
+    grouped = {{ dataset }}_df.groupby([{{ by_vars|join(', ') }}])
+    {% endif %}
+    
+    {% if var_vars %}
+    result_df = {{ dataset }}_df.pivot(
+        {% if by_vars %}index={{ by_vars|join(', ') }},{% endif %}
+        {% if id_var %}columns='{{ id_var }}',{% endif %}
+        values=[{{ var_vars|join(', ') }}]
+    )
+    {% endif %}
+    {% endif %}
+
+# PROC FREQ template
+proc_freq:
+  template: |
+    {% if dataset %}
+    # Frequency analysis for {{ dataset }}
+    {% if tables %}
+    {% for table in tables %}
+    # Frequency table for {{ table }}
+    freq_table = pd.crosstab(
+        {{ dataset }}_df['{{ table.rows }}'],
+        {% if table.cols %}{{ dataset }}_df['{{ table.cols }}'],{% endif %}
+        margins=True
+    )
+    
+    {% if table.chisq %}
+    from scipy.stats import chi2_contingency
+    chi2, p_value, dof, expected = chi2_contingency(freq_table)
+    print(f"\nChi-square test results:")
+    print(f"Chi2 statistic: {chi2:.4f}")
+    print(f"p-value: {p_value:.4f}")
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+    {% endif %}
+
+# PROC ANOVA template
+proc_anova:
+  template: |
+    {% if dataset and dependent and class_vars %}
+    # ANOVA analysis
+    from scipy import stats
+    import statsmodels.api as sm
+    from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    
+    # Prepare data
+    model_data = {{ dataset }}_df.dropna(subset=['{{ dependent }}'] + [{{ class_vars|join(', ') }}])
+    
+    # One-way ANOVA
+    groups = [group for _, group in model_data.groupby('{{ class_vars[0] }}')['{{ dependent }}']]
+    f_stat, p_value = stats.f_oneway(*groups)
+    
+    print("\nOne-way ANOVA Results:")
+    print(f"F-statistic: {f_stat:.4f}")
+    print(f"p-value: {p_value:.4f}")
+    
+    # Post-hoc Tukey test
+    tukey = pairwise_tukeyhsd(
+        model_data['{{ dependent }}'],
+        model_data['{{ class_vars[0] }}']
+    )
+    print("\nTukey's HSD Test Results:")
+    print(tukey)
+    
+    {% if plots %}
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    
+    # Box plot
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(x='{{ class_vars[0] }}', y='{{ dependent }}', data=model_data)
+    plt.title('Distribution by Group')
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC GLM template
+proc_glm:
+  template: |
+    {% if dataset and dependent and independent %}
+    # General Linear Model analysis
+    import statsmodels.api as sm
+    import numpy as np
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
+    {% if class_vars %}
+    # Add dummy variables for categorical predictors
+    X = pd.get_dummies({{ dataset }}_df[[{{ independent|join(', ') }}, {{ class_vars|join(', ') }}]], 
+                      columns=[{{ class_vars|join(', ') }}])
+    {% endif %}
+    X = sm.add_constant(X)
+    y = {{ dataset }}_df['{{ dependent }}']
+    
+    # Fit model
+    model = sm.OLS(y, X).fit()
+    
+    print("\nGLM Results:")
+    print(model.summary())
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    
+    # Diagnostic plots
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Residuals vs Fitted
+    axes[0,0].scatter(model.fittedvalues, model.resid)
+    axes[0,0].axhline(y=0, color='r', linestyle='--')
+    axes[0,0].set_xlabel('Fitted values')
+    axes[0,0].set_ylabel('Residuals')
+    axes[0,0].set_title('Residuals vs Fitted')
+    
+    # Q-Q plot
+    sm.graphics.qqplot(model.resid, line='45', fit=True, ax=axes[0,1])
+    axes[0,1].set_title('Q-Q Plot')
+    
+    # Scale-Location
+    axes[1,0].scatter(model.fittedvalues, np.sqrt(np.abs(model.resid)))
+    axes[1,0].set_xlabel('Fitted values')
+    axes[1,0].set_ylabel('Sqrt(|Residuals|)')
+    axes[1,0].set_title('Scale-Location')
+    
+    # Leverage plot
+    sm.graphics.influence_plot(model, ax=axes[1,1])
+    
+    plt.tight_layout()
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC MIXED template
+proc_mixed:
+  template: |
+    {% if dataset and dependent and fixed_effects %}
+    # Mixed Effects Model analysis
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
+    
+    # Construct formula
+    fixed_effects_str = ' + '.join([{{ fixed_effects|join(' + ') }}])
+    {% if random_effects %}
+    random_effects_str = ' + '.join([{{ random_effects|join(' + ') }}])
+    formula = "{{ dependent }} ~ " + fixed_effects_str + " + (1|" + random_effects_str + ")"
+    {% else %}
+    formula = "{{ dependent }} ~ " + fixed_effects_str
+    {% endif %}
+    
+    # Fit mixed model
+    model = smf.mixedlm(formula, data={{ dataset }}_df, groups={{ dataset }}_df['{{ groups }}'])
+    results = model.fit()
+    
+    print("\nMixed Model Results:")
+    print(results.summary())
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Random effects plot
+    plt.figure(figsize=(10, 6))
+    ranef_df = pd.DataFrame(results.random_effects)
+    sns.boxplot(data=ranef_df)
+    plt.title('Random Effects Distribution')
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC LOGISTIC template
+proc_logistic:
+  template: |
+    {% if dataset and dependent and independent %}
+    # Logistic Regression analysis
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import classification_report, roc_curve, auc
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
+    y = {{ dataset }}_df['{{ dependent }}']
+    
+    # Fit model
+    model = LogisticRegression(random_state=42)
+    model.fit(X, y)
+    
+    # Predictions
+    y_pred = model.predict(X)
+    y_pred_proba = model.predict_proba(X)[:, 1]
+    
+    print("\nLogistic Regression Results:")
+    print("\nModel Coefficients:")
+    for var, coef in zip([{{ independent|join(', ') }}], model.coef_[0]):
+        print(f"{var}: {coef:.4f}")
+    print(f"\nIntercept: {model.intercept_[0]:.4f}")
+    
+    print("\nClassification Report:")
+    print(classification_report(y, y_pred))
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    
+    # ROC curve
+    fpr, tpr, _ = roc_curve(y, y_pred_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC) Curve')
+    plt.legend(loc="lower right")
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC CLUSTER template
+proc_cluster:
+  template: |
+    {% if dataset and variables %}
+    # Hierarchical Clustering analysis
+    from scipy.cluster.hierarchy import dendrogram, linkage
+    from sklearn.preprocessing import StandardScaler
+    
+    # Prepare and scale data
+    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    X_scaled = StandardScaler().fit_transform(X)
+    
+    # Perform hierarchical clustering
+    linkage_matrix = linkage(X_scaled, method='ward')
+    
+    {% if n_clusters %}
+    from sklearn.cluster import AgglomerativeClustering
+    
+    # Create clusters
+    cluster = AgglomerativeClustering(n_clusters={{ n_clusters }})
+    cluster_labels = cluster.fit_predict(X_scaled)
+    
+    # Add cluster labels to dataset
+    {{ dataset }}_df['Cluster'] = cluster_labels
+    
+    print("\nCluster Sizes:")
+    print({{ dataset }}_df['Cluster'].value_counts())
+    
+    print("\nCluster Means:")
+    print({{ dataset }}_df.groupby('Cluster')[[{{ variables|join(', ') }}]].mean())
+    {% endif %}
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Dendrogram
+    plt.figure(figsize=(10, 7))
+    dendrogram(linkage_matrix)
+    plt.title('Hierarchical Clustering Dendrogram')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Distance')
+    plt.show()
+    
+    # Cluster visualization (if 2 or 3 variables)
+    if len([{{ variables|join(', ') }}]) == 2:
+        plt.figure(figsize=(8, 6))
+        sns.scatterplot(data={{ dataset }}_df, 
+                       x='{{ variables[0] }}', 
+                       y='{{ variables[1] }}',
+                       hue='Cluster',
+                       palette='deep')
+        plt.title('Cluster Plot')
+        plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC FACTOR template
+proc_factor:
+  template: |
+    {% if dataset and variables %}
+    # Factor Analysis
+    from factor_analyzer import FactorAnalyzer
+    from factor_analyzer.factor_analyzer import calculate_kmo
+    import numpy as np
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    
+    # KMO test
+    kmo_all, kmo_model = calculate_kmo(X)
+    print(f'\nKMO score: {kmo_model:.3f}')
+    
+    # Determine number of factors
+    fa = FactorAnalyzer(rotation=None, n_factors=X.shape[1])
+    fa.fit(X)
+    ev, v = fa.get_eigenvalues()
+    n_factors = sum(ev > 1)
+    
+    # Perform factor analysis
+    fa = FactorAnalyzer(rotation='varimax', n_factors=n_factors)
+    fa.fit(X)
+    
+    # Get factor loadings
+    loadings = pd.DataFrame(
+        fa.loadings_,
+        columns=[f'Factor{i+1}' for i in range(n_factors)],
+        index=[{{ variables|join(', ') }}]
+    )
+    
+    print('\nFactor Loadings:')
+    print(loadings)
+    
+    # Variance explained
+    variance = pd.DataFrame(
+        fa.get_factor_variance(),
+        columns=['SS Loadings', 'Proportion Var', 'Cumulative Var']
+    )
+    print('\nVariance Explained:')
+    print(variance)
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Scree plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(ev) + 1), ev)
+    plt.plot([1, len(ev)], [1, 1], '--')
+    plt.title('Scree Plot')
+    plt.xlabel('Factors')
+    plt.ylabel('Eigenvalue')
+    plt.show()
+    
+    # Factor loadings heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(loadings, annot=True, cmap='coolwarm', center=0)
+    plt.title('Factor Loadings Heatmap')
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC DISCRIM template
+proc_discrim:
+  template: |
+    {% if dataset and variables and class_var %}
+    # Discriminant Analysis
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.model_selection import cross_val_score
+    from sklearn.metrics import classification_report, confusion_matrix
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    y = {{ dataset }}_df['{{ class_var }}']
+    
+    # Fit LDA
+    lda = LinearDiscriminantAnalysis()
+    lda.fit(X, y)
+    
+    # Cross-validation
+    cv_scores = cross_val_score(lda, X, y, cv=5)
+    print('\nCross-validation scores:', cv_scores)
+    print('Mean CV score:', cv_scores.mean())
+    
+    # Classification results
+    y_pred = lda.predict(X)
+    print('\nClassification Report:')
+    print(classification_report(y, y_pred))
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Confusion matrix
+    plt.figure(figsize=(8, 6))
+    cm = confusion_matrix(y, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.show()
+    
+    # If 2 variables, plot decision boundary
+    if len([{{ variables|join(', ') }}]) == 2:
+        plt.figure(figsize=(10, 6))
+        plot_decision_boundary(lda, X, y)
+        plt.title('LDA Decision Boundary')
+        plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC PRINCOMP template
+proc_princomp:
+  template: |
+    {% if dataset and variables %}
+    # Principal Components Analysis
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+    
+    # Prepare and scale data
+    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    X_scaled = StandardScaler().fit_transform(X)
+    
+    # Perform PCA
+    pca = PCA()
+    pca_result = pca.fit_transform(X_scaled)
+    
+    # Calculate explained variance
+    var_exp = pca.explained_variance_ratio_
+    cum_var_exp = np.cumsum(var_exp)
+    
+    print('\nExplained Variance Ratio:')
+    for i, var in enumerate(var_exp):
+        print(f'PC{i+1}: {var:.4f} ({cum_var_exp[i]:.4f} cumulative)')
+    
+    # Component loadings
+    loadings = pd.DataFrame(
+        pca.components_.T,
+        columns=[f'PC{i+1}' for i in range(len(var_exp))],
+        index=[{{ variables|join(', ') }}]
+    )
+    print('\nComponent Loadings:')
+    print(loadings)
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Scree plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(1, len(var_exp) + 1), var_exp, 'bo-')
+    plt.plot(range(1, len(var_exp) + 1), cum_var_exp, 'ro-')
+    plt.title('Scree Plot')
+    plt.xlabel('Principal Component')
+    plt.ylabel('Proportion of Variance Explained')
+    plt.legend(['Individual', 'Cumulative'])
+    plt.show()
+    
+    # Biplot (if 2 components)
+    if len([{{ variables|join(', ') }}]) >= 2:
+        plt.figure(figsize=(10, 8))
+        plt.scatter(pca_result[:, 0], pca_result[:, 1])
+        for i, var in enumerate([{{ variables|join(', ') }}]):
+            plt.arrow(0, 0, 
+                     loadings.iloc[i, 0] * max(pca_result[:, 0]),
+                     loadings.iloc[i, 1] * max(pca_result[:, 1]),
+                     color='r', alpha=0.5)
+            plt.text(loadings.iloc[i, 0] * max(pca_result[:, 0]) * 1.15,
+                    loadings.iloc[i, 1] * max(pca_result[:, 1]) * 1.15,
+                    var)
+        plt.xlabel('First Principal Component')
+        plt.ylabel('Second Principal Component')
+        plt.title('PCA Biplot')
+        plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC MANOVA template
+proc_manova:
+  template: |
+    {% if dataset and dependent_vars and class_vars %}
+    # Multivariate Analysis of Variance
+    from statsmodels.multivariate.manova import MANOVA
+    import numpy as np
+    import pandas as pd
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ dependent_vars|join(', ') }}]]
+    grouping = {{ dataset }}_df['{{ class_vars[0] }}']
+    
+    # Fit MANOVA
+    manova = MANOVA.from_formula('{{ dependent_vars|join(' + ') }} ~ {{ class_vars[0] }}', 
+                                data={{ dataset }}_df)
+    result = manova.mv_test()
+    
+    print("\nMANOVA Results:")
+    print(result.summary())
+    
+    # Univariate follow-up
+    print("\nUnivariate Follow-up Tests:")
+    for dv in [{{ dependent_vars|join(', ') }}]:
+        from scipy import stats
+        groups = [group for _, group in {{ dataset }}_df.groupby('{{ class_vars[0] }}')[dv]]
+        f_stat, p_val = stats.f_oneway(*groups)
+        print(f"\n{dv}:")
+        print(f"F-statistic: {f_stat:.4f}")
+        print(f"p-value: {p_val:.4f}")
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Box plots for each dependent variable
+    fig, axes = plt.subplots(1, len([{{ dependent_vars|join(', ') }}]), 
+                            figsize=(15, 5))
+    for i, dv in enumerate([{{ dependent_vars|join(', ') }}]):
+        sns.boxplot(x='{{ class_vars[0] }}', y=dv, 
+                   data={{ dataset }}_df, ax=axes[i])
+        axes[i].set_title(dv)
+    plt.tight_layout()
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC TIMESERIES template
+proc_timeseries:
+  template: |
+    {% if dataset and time_var and value_var %}
+    # Time Series Analysis
+    from statsmodels.tsa.seasonal import seasonal_decompose
+    from statsmodels.tsa.stattools import adfuller
+    from statsmodels.tsa.arima.model import ARIMA
+    import pandas as pd
+    
+    # Prepare time series data
+    ts_data = {{ dataset }}_df.set_index('{{ time_var }}')['{{ value_var }}']
+    
+    # Decomposition
+    decomposition = seasonal_decompose(ts_data, period={{ period|default(12) }})
+    
+    # Stationarity test
+    adf_test = adfuller(ts_data)
+    print('\nAugmented Dickey-Fuller Test:')
+    print(f'ADF Statistic: {adf_test[0]:.4f}')
+    print(f'p-value: {adf_test[1]:.4f}')
+    
+    # ARIMA modeling
+    model = ARIMA(ts_data, order=({{ p|default(1) }}, {{ d|default(1) }}, {{ q|default(1) }}))
+    results = model.fit()
+    print('\nARIMA Model Summary:')
+    print(results.summary())
+    
+    # Forecasting
+    forecast = results.forecast(steps={{ forecast_steps|default(12) }})
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    
+    # Decomposition plots
+    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 10))
+    decomposition.observed.plot(ax=ax1)
+    ax1.set_title('Observed')
+    decomposition.trend.plot(ax=ax2)
+    ax2.set_title('Trend')
+    decomposition.seasonal.plot(ax=ax3)
+    ax3.set_title('Seasonal')
+    decomposition.resid.plot(ax=ax4)
+    ax4.set_title('Residual')
+    plt.tight_layout()
+    plt.show()
+    
+    # Forecast plot
+    plt.figure(figsize=(12, 6))
+    ts_data.plot(label='Observed')
+    forecast.plot(label='Forecast')
+    plt.title('Time Series Forecast')
+    plt.legend()
+    plt.show()
+    {% endif %}
+    {% endif %}
+
+# PROC SURVIVAL template
+proc_survival:
+  template: |
+    {% if dataset and time_var and event_var %}
+    # Survival Analysis
+    from lifelines import KaplanMeierFitter
+    from lifelines import CoxPHFitter
+    
+    # Prepare data
+    time = {{ dataset }}_df['{{ time_var }}']
+    event = {{ dataset }}_df['{{ event_var }}']
+    
+    # Kaplan-Meier estimation
+    kmf = KaplanMeierFitter()
+    kmf.fit(time, event, label='Overall')
+    
+    print('\nKaplan-Meier Model Summary:')
+    print(kmf.print_summary())
+    
+    {% if covariates %}
+    # Cox Proportional Hazards
+    cph = CoxPHFitter()
+    cph.fit({{ dataset }}_df[[
+        '{{ time_var }}', 
+        '{{ event_var }}',
+        {{ covariates|join(', ') }}
+    ]], 
+    duration_col='{{ time_var }}',
+    event_col='{{ event_var }}')
+    
+    print('\nCox Proportional Hazards Model:')
+    print(cph.print_summary())
+    {% endif %}
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    
+    # Survival curve
+    plt.figure(figsize=(10, 6))
+    kmf.plot()
+    plt.title('Kaplan-Meier Survival Curve')
+    plt.show()
+    
+    {% if strata_var %}
+    # Stratified survival curves
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for value in {{ dataset }}_df['{{ strata_var }}'].unique():
+        mask = {{ dataset }}_df['{{ strata_var }}'] == value
+        kmf_strata = KaplanMeierFitter()
+        kmf_strata.fit(
+            time[mask], 
+            event[mask],
+            label=f'{{ strata_var }}={value}'
+        )
+        kmf_strata.plot(ax=ax)
+    plt.title('Stratified Survival Curves')
+    plt.show()
+    {% endif %}
+    
+    {% if covariates %}
+    # Cox model plots
+    cph.plot_partial_effects('{{ covariates[0] }}')
+    plt.title('Partial Effect Plot')
+    plt.show()
+    {% endif %}
+    {% endif %}
+    {% endif %}
+
+# PROC CANDISC template
+proc_candisc:
+  template: |
+    {% if dataset and variables and class_var %}
+    # Canonical Discriminant Analysis
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.preprocessing import StandardScaler
+    
+    # Prepare data
+    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    y = {{ dataset }}_df['{{ class_var }}']
+    
+    # Scale features
+    X_scaled = StandardScaler().fit_transform(X)
+    
+    # Fit LDA for canonical analysis
+    lda = LinearDiscriminantAnalysis()
+    X_canon = lda.fit_transform(X_scaled, y)
+    
+    # Calculate canonical correlations
+    canon_corr = np.sqrt(lda.explained_variance_ratio_)
+    
+    print('\nCanonical Correlations:')
+    for i, corr in enumerate(canon_corr):
+        print(f'Can{i+1}: {corr:.4f}')
+    
+    # Structure matrix
+    structure = np.corrcoef(X_scaled.T, X_canon.T)[:len(X.columns), -len(canon_corr):]
+    struct_df = pd.DataFrame(
+        structure,
+        index=[{{ variables|join(', ') }}],
+        columns=[f'Can{i+1}' for i in range(len(canon_corr))]
+    )
+    
+    print('\nStructure Matrix:')
+    print(struct_df)
+    
+    {% if plots %}
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # Canonical variate plot (first two variates)
+    if X_canon.shape[1] >= 2:
+        plt.figure(figsize=(10, 6))
+        scatter = plt.scatter(X_canon[:, 0], X_canon[:, 1], c=y)
+        plt.xlabel('First Canonical Variable')
+        plt.ylabel('Second Canonical Variable')
+        plt.title('Canonical Discriminant Analysis')
+        plt.legend(*scatter.legend_elements(), title='Classes')
+        plt.show()
+    
+    # Structure correlations heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(struct_df, annot=True, cmap='coolwarm', center=0)
+    plt.title('Structure Matrix Heatmap')
+    plt.show()
+    {% endif %}
+    {% endif %}

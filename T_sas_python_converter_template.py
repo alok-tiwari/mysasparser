@@ -1,4 +1,4 @@
-from template_loader import TemplateLoader
+from T_template_loader import TemplateLoader
 from typing import Dict, Any, List, Optional
 import re
 import logging
@@ -15,7 +15,7 @@ class SASConversionError(Exception):
         super().__init__(f"SAS Conversion Error: {message}")
 
 class SASPythonConverterTemplate:
-    def __init__(self, template_file: str = 'sas_templates.yaml'):
+    def __init__(self, template_file: str = 'T_sas_templates.yaml'):
         """Initialize converter with templates."""
         self.template_loader = TemplateLoader(template_file)
         self.templates = self.template_loader.load_templates()
@@ -30,10 +30,19 @@ class SASPythonConverterTemplate:
         return None
 
     def convert_component(self, component: Dict[str, Any]) -> str:
-        """Convert a SAS component using appropriate template."""
+        """Convert a SAS component with enhanced error handling."""
         try:
-            # Validate component
-            self._validate_component(component)
+            # Validate component structure
+            if not isinstance(component, dict):
+                raise SASConversionError("Invalid component format", component)
+            
+            required_fields = ['type', 'content']
+            missing_fields = [f for f in required_fields if f not in component]
+            if missing_fields:
+                raise SASConversionError(
+                    f"Missing required fields: {', '.join(missing_fields)}", 
+                    component
+                )
             
             component_type = component.get('type', '').upper()
             component_name = component.get('name', '').upper()
@@ -57,24 +66,15 @@ class SASPythonConverterTemplate:
             
             return result
             
-        except SASConversionError as e:
-            logger.error(f"Conversion error: {str(e)}")
-            if self.error_handler:
-                self.error_handler.add_error(
-                    component=str(component.get('type', 'Unknown')),
-                    message=str(e),
-                    details=e.details
-                )
-            return f"# ERROR: {str(e)}\n# {component.get('content', '')}"
-        
+        except SASConversionError:
+            raise
         except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-            if self.error_handler:
-                self.error_handler.add_error(
-                    component=str(component.get('type', 'Unknown')),
-                    message=f"Unexpected error: {str(e)}"
-                )
-            return f"# ERROR: Unexpected error - {str(e)}\n# {component.get('content', '')}"
+            logger.error(f"Unexpected error converting component: {str(e)}", exc_info=True)
+            raise SASConversionError(
+                "Unexpected error during conversion",
+                component,
+                {'error': str(e)}
+            )
 
     def _validate_component(self, component: Dict[str, Any]):
         """Validate component structure."""
@@ -170,37 +170,110 @@ class SASPythonConverterTemplate:
         return match.group(1) if match else "df"
 
     def _extract_variables(self, content: str) -> List[str]:
-        """Extract variable names from SAS code."""
-        match = re.search(r'var\s+(.*?);', content, re.IGNORECASE)
-        return match.group(1).split() if match else []
+        """Extract variables from VAR statement."""
+        variables = []
+        
+        # Extract VAR statement
+        var_match = re.search(r'var\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
+        if var_match:
+            # Split and clean variable names
+            var_text = var_match.group(1)
+            variables = [v.strip() for v in var_text.split() if v.strip()]
+        
+        return variables
 
     def _extract_means_params(self, content: str) -> Dict[str, Any]:
-        """Extract parameters for PROC MEANS."""
-        return {
-            'maxdec': self._extract_maxdec(content),
-            'by_vars': self._extract_by_vars(content),
-            'nway': 'nway' in content.lower(),
-            'noprint': 'noprint' in content.lower()
+        """Extract parameters specific to PROC MEANS."""
+        params = {
+            'maxdec': None,
+            'nway': False,
+            'by_vars': [],
+            'output': None
         }
+        
+        # Extract MAXDEC option
+        maxdec_match = re.search(r'maxdec\s*=\s*(\d+)', content, re.IGNORECASE)
+        if maxdec_match:
+            params['maxdec'] = int(maxdec_match.group(1))
+        
+        # Check for NWAY option
+        if re.search(r'\bnway\b', content, re.IGNORECASE):
+            params['nway'] = True
+        
+        # Extract BY variables
+        by_match = re.search(r'by\s+(.*?);', content, re.IGNORECASE)
+        if by_match:
+            params['by_vars'] = [v.strip() for v in by_match.group(1).split()]
+        
+        # Extract OUTPUT statement
+        output_match = re.search(r'output\s+out\s*=\s*(\w+)', content, re.IGNORECASE)
+        if output_match:
+            params['output'] = output_match.group(1)
+        
+        return params
 
     def _extract_freq_params(self, content: str) -> Dict[str, Any]:
-        """Extract parameters for PROC FREQ."""
-        tables_match = re.search(r'tables\s+(.*?);', content, re.IGNORECASE)
-        return {
-            'tables': tables_match.group(1).split() if tables_match else [],
-            'chisq': 'chisq' in content.lower()
+        """Extract parameters specific to PROC FREQ."""
+        params = {
+            'tables': [],
+            'chisq': False,
+            'cmh': False,
+            'strata_var': None
         }
+        
+        # Extract TABLES statement
+        tables_match = re.search(r'tables\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
+        if tables_match:
+            tables_text = tables_match.group(1)
+            params['tables'] = [t.strip() for t in tables_text.split('/')[0].split()]
+        
+        # Check for CHISQ option
+        if re.search(r'/\s*chisq\b', content, re.IGNORECASE):
+            params['chisq'] = True
+        
+        # Check for CMH option and strata
+        if re.search(r'/\s*cmh\b', content, re.IGNORECASE):
+            params['cmh'] = True
+            strata_match = re.search(r'strata\s+(\w+)', content, re.IGNORECASE)
+            if strata_match:
+                params['strata_var'] = strata_match.group(1)
+        
+        return params
 
     def _extract_sort_params(self, content: str) -> Dict[str, Any]:
-        """Extract parameters for PROC SORT."""
-        by_match = re.search(r'by\s+(.*?);', content, re.IGNORECASE)
-        out_match = re.search(r'out\s*=\s*(\w+)', content, re.IGNORECASE)
-        return {
-            'by_vars': by_match.group(1).split() if by_match else [],
-            'out_name': out_match.group(1) if out_match else None,
-            'nodupkey': 'nodupkey' in content.lower(),
-            'nodup': 'nodup' in content.lower()
+        """Extract parameters specific to PROC SORT."""
+        params = {
+            'by_vars': [],
+            'nodupkey': False,
+            'nodup': False,
+            'out_name': None,
+            'data_name': None
         }
+        
+        # Extract dataset names
+        data_match = re.search(r'proc\s+sort\s+data\s*=\s*(\w+)', content, re.IGNORECASE)
+        if data_match:
+            params['data_name'] = data_match.group(1)
+        
+        out_match = re.search(r'out\s*=\s*(\w+)', content, re.IGNORECASE)
+        if out_match:
+            params['out_name'] = out_match.group(1)
+        else:
+            params['out_name'] = params['data_name']
+        
+        # Extract BY variables
+        by_match = re.search(r'by\s+(.*?);', content, re.IGNORECASE)
+        if by_match:
+            by_text = by_match.group(1)
+            params['by_vars'] = [v.strip() for v in by_text.split()]
+        
+        # Check for NODUPKEY and NODUP options
+        if re.search(r'\bnodupkey\b', content, re.IGNORECASE):
+            params['nodupkey'] = True
+        elif re.search(r'\bnodup\b', content, re.IGNORECASE):
+            params['nodup'] = True
+        
+        return params
 
     def _extract_data_params(self, component: Dict[str, Any]) -> Dict[str, Any]:
         """Extract parameters for DATA step."""
@@ -817,4 +890,73 @@ class SASPythonConverterTemplate:
                 'function': match.group(1),
                 'name': match.group(2)
             })
-        return stats 
+        return stats
+
+    def _extract_data_statements(self, component: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract statements from DATA step."""
+        content = component.get('content', '')
+        statements = []
+        
+        # Split into individual statements
+        for stmt in content.split(';'):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            
+            # Identify statement type and parse
+            if stmt.lower().startswith('set '):
+                statements.append({
+                    'type': 'set',
+                    'dataset': re.search(r'set\s+(\w+)', stmt, re.IGNORECASE).group(1)
+                })
+            elif '=' in stmt:
+                var, expr = stmt.split('=', 1)
+                statements.append({
+                    'type': 'assignment',
+                    'variable': var.strip(),
+                    'expression': expr.strip()
+                })
+            elif stmt.lower().startswith('if '):
+                statements.append({
+                    'type': 'if',
+                    'condition': stmt[2:].strip()
+                })
+        
+        return statements 
+
+    def _convert_proc_format(self, component: Dict[str, Any]) -> str:
+        """Convert PROC FORMAT statements."""
+        try:
+            params = self._extract_format_params(component)
+            return self.templates.get('proc_format').render(**params)
+        except Exception as e:
+            raise SASConversionError("Error converting PROC FORMAT", component, {'error': str(e)})
+
+    def _convert_data_filtered(self, component: Dict[str, Any]) -> str:
+        """Convert filtered DATA step."""
+        try:
+            params = self._extract_data_params(component)
+            return self.templates.get('data_step').render(**params)
+        except Exception as e:
+            raise SASConversionError("Error converting DATA step", component, {'error': str(e)})
+
+    def _convert_proc_sql(self, component: Dict[str, Any]) -> str:
+        """Convert PROC SQL statements."""
+        try:
+            params = self._extract_sql_params(component)
+            return self.templates.get('proc_sql').render(**params)
+        except Exception as e:
+            raise SASConversionError("Error converting PROC SQL", component, {'error': str(e)})
+
+    def _store_embeddings(self, embeddings: List[Dict[str, Any]]):
+        """Store embeddings with deduplication."""
+        seen_ids = set()
+        unique_embeddings = []
+        
+        for emb in embeddings:
+            emb_id = emb.get('id')
+            if emb_id not in seen_ids:
+                seen_ids.add(emb_id)
+                unique_embeddings.append(emb)
+        
+        return unique_embeddings 

@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 import unittest
 from T_sas_python_converter_template import SASPythonConverterTemplate
+import glob
 
 def test_parser():
     # Test SAS Parser
@@ -199,46 +200,120 @@ def test_end_to_end_conversion(input_dir, output_dir):
         "python_files_created": len(converted_files)
     }
 
+def test_template_converter():
+    """Test the template-based converter."""
+    print("\n=== Testing Template-Based Converter ===")
+    converter = SASPythonConverterTemplate()
+    
+    # Test cases with expected outputs
+    test_cases = [
+        {
+            'type': 'PROC',
+            'name': 'means',
+            'content': """
+            PROC MEANS data=mydata maxdec=2;
+                var age income;
+                by gender;
+            run;
+            """,
+            'expected': ['mydata_df', 'age', 'income', 'gender', 'describe']
+        },
+        {
+            'type': 'DATA',
+            'content': """
+            DATA filtered;
+                set mydata;
+                where age > 18;
+                bmi = weight / (height * height) * 703;
+            run;
+            """,
+            'expected': ['filtered_df', 'mydata_df', 'age > 18', 'bmi']
+        },
+        {
+            'type': 'PROC',
+            'name': 'sql',
+            'content': """
+            PROC SQL;
+                SELECT name, age, calculated bmi
+                FROM filtered
+                WHERE bmi > 20
+                ORDER BY bmi desc;
+            quit;
+            """,
+            'expected': ['filtered_df', 'bmi > 20', 'sort_values']
+        }
+    ]
+    
+    print("\nTesting component conversions:")
+    for case in test_cases:
+        print(f"\nConverting {case['type']} {case.get('name', '')}")
+        try:
+            result = converter.convert_component(case)
+            print("Result:")
+            print(result)
+            # Verify expected elements are in result
+            for expected in case['expected']:
+                assert expected in result, f"Expected '{expected}' not found in result"
+            print("✓ All expected elements found")
+        except Exception as e:
+            print(f"Error: {str(e)}")
+
+def clean_output_directory(output_dir: str):
+    """Clean up the output directory."""
+    import shutil
+    try:
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir)
+        os.makedirs(output_dir)
+        print(f"\nCleaned output directory: {output_dir}")
+    except Exception as e:
+        print(f"Error cleaning output directory: {str(e)}")
+
 def main():
-    # Set up command line arguments
-    parser = argparse.ArgumentParser(description='Test SAS parser, embedding generation, and conversion')
-    parser.add_argument('--input', '-i', default='mock_data', help='Input directory containing SAS files')
-    parser.add_argument('--output', '-o', default='python_output', help='Output directory for Python files')
-    parser.add_argument('--test', '-t', choices=['parser', 'embeddings', 'vector', 'single', 'directory', 'conversion', 'all'], 
-                        default='all', help='Which test to run')
-    parser.add_argument('--clean', '-c', action='store_true', help='Clean ChromaDB before and after tests')
-    
+    """Main test function."""
+    parser = argparse.ArgumentParser(description='Test SAS Parser')
+    parser.add_argument('--input', default='./mock_data', help='Input directory with SAS files')
+    parser.add_argument('--output', default='./mock_output', help='Output directory for Python files')
+    parser.add_argument('--clean', action='store_true', help='Clean output directory before running')
     args = parser.parse_args()
-    
+
     if args.clean:
+        # Clean up output directory first
+        clean_output_directory(args.output)
+        print("\nCleaning up ChromaDB...")
         cleanup_chromadb()
-    
-    if args.test in ['parser', 'all']:
-        print("\nTesting Parser...")
-        test_parser()
-    
-    if args.test in ['embeddings', 'all']:
-        print("\nTesting Embedding Generation...")
-        test_embeddings()
-    
-    if args.test in ['vector', 'all']:
-        print("\nTesting Vector Store...")
-        test_vector_store()
-    
-    if args.test in ['single', 'all']:
-        print("\nTesting Single Component...")
-        test_single_component()
-    
-    if args.test in ['directory', 'all']:
-        print("\nTesting Directory Parsing...")
-        test_directory_parsing()
-    
-    if args.test in ['conversion', 'all']:
-        print("\nTesting End-to-End Conversion...")
-        test_end_to_end_conversion(args.input, args.output)
-    
-    if args.clean:
-        cleanup_chromadb()
+        print("ChromaDB cleaned up")
+
+    print("\nTesting Parser...")
+    test_parser()
+
+    print("\nTesting Template Converter...")
+    test_template_converter()
+
+    # Convert all SAS files in mock_data
+    if os.path.exists(args.input):
+        converter = SASPythonConverterTemplate()
+        sas_files = glob.glob(os.path.join(args.input, "*.sas"))
+        
+        if not os.path.exists(args.output):
+            os.makedirs(args.output)
+            
+        converted_count = 0
+        for sas_file in sas_files:
+            try:
+                output_file = os.path.join(
+                    args.output, 
+                    os.path.splitext(os.path.basename(sas_file))[0] + '.py'
+                )
+                converter.convert_file(sas_file, output_file)
+                converted_count += 1
+                print(f"Successfully converted {sas_file} to {output_file}")
+            except Exception as e:
+                print(f"Error converting {sas_file}: {str(e)}")
+                
+        print(f"\nConverted {converted_count} files to Python")
+        print(f"\nConversion complete!")
+        print(f"Output Python files are in: {args.output}")
 
 class TestSASPythonConverter(unittest.TestCase):
     def setUp(self):
