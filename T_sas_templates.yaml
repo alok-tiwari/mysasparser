@@ -1,0 +1,2512 @@
+# SAS to Python conversion templates
+
+imports:
+  default: |
+    import pandas as pd
+    import numpy as np
+    from scipy import stats
+    import os
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import re
+    from typing import Any, List, Dict
+
+proc_means:
+  template: |
+    # Calculate descriptive statistics
+    {% if maxdec %}
+    pd.set_option('display.float_format', lambda x: '{{0:.{maxdec}f}}'.format(x))
+    {% endif %}
+    
+    {% if by_vars %}
+    {% if nway %}
+    # NWAY option: only show statistics for each BY group combination
+    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}], dropna=False)
+    {% endif %}
+    {% if variables %}
+    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}])[{{variables|join_quotes}}].describe()
+    {% else %}
+    stats_df = {{dataset}}_df.groupby([{{by_vars|join_quotes}}]).describe()
+    {% endif %}
+    stats_df = stats_df.reset_index()
+    {% else %}
+    {% if variables %}
+    stats_df = {{dataset}}_df[[{{variables|join_quotes}}]].describe()
+    {% else %}
+    stats_df = {{dataset}}_df.describe()
+    {% endif %}
+    {% endif %}
+    
+    {% if output %}
+    # Save statistics to new DataFrame
+    {{output}}_df = stats_df.copy()
+    {% endif %}
+    
+    {% if not noprint %}
+    print('\nDescriptive Statistics:')
+    print(stats_df)
+    {% endif %}
+
+proc_freq:
+  template: |
+    # Enhanced frequency analysis
+    from scipy import stats
+    import numpy as np
+    
+    {% for table in tables %}
+    {% if '*' in table %}
+    {% set vars = table.split('*') %}
+    # Cross-tabulation of {{vars|join(' by ')}}
+    ctab = pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'])
+    
+    print('\nCross-tabulation:')
+    print(ctab)
+    
+    # Add row and column percentages
+    print('\nRow Percentages:')
+    print(pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'], normalize='index') * 100)
+    print('\nColumn Percentages:')
+    print(pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'], normalize='columns') * 100)
+    
+    {% if chisq %}
+    # Chi-square test
+    chi2, p_value, dof, expected = stats.chi2_contingency(ctab)
+    print('\nChi-square test results:')
+    print(f'Chi-square statistic: {chi2:.4f}')
+    print(f'p-value: {p_value:.4f}')
+    print(f'Degrees of freedom: {dof}')
+    print(f'Significant at α=0.05: {p_value < 0.05}')
+    
+    # Fisher's exact test (for 2x2 tables)
+    if ctab.shape == (2, 2):
+        fisher_stat, fisher_p = stats.fisher_exact(ctab)
+        print('\nFisher\'s Exact Test:')
+        print(f'Odds ratio: {fisher_stat:.4f}')
+        print(f'p-value: {fisher_p:.4f}')
+    
+    # Measures of association
+    n = ctab.sum().sum()
+    cramers_v = np.sqrt(chi2 / (n * min(ctab.shape[0]-1, ctab.shape[1]-1)))
+    print('\nMeasures of Association:')
+    print(f'Cramer\'s V: {cramers_v:.4f}')
+    {% endif %}
+    
+    {% if cmh and strata_var %}
+    # Cochran-Mantel-Haenszel test
+    from statsmodels.stats.contingency_tables import StratifiedTable
+    strata = {{dataset}}_df['{{strata_var}}'].unique()
+    tables = [pd.crosstab(
+        {{dataset}}_df[{{dataset}}_df['{{strata_var}}'] == s]['{{vars[0]}}'],
+        {{dataset}}_df[{{dataset}}_df['{{strata_var}}'] == s]['{{vars[1]}}']
+    ) for s in strata]
+    
+    cmh_result = StratifiedTable(tables).test_null_odds()
+    print('\nCochran-Mantel-Haenszel Test:')
+    print(f'Statistic: {cmh_result.statistic:.4f}')
+    print(f'p-value: {cmh_result.pvalue:.4f}')
+    {% endif %}
+    
+    {% else %}
+    # Single variable frequency distribution
+    freq = {{dataset}}_df['{{table}}'].value_counts()
+    pct = {{dataset}}_df['{{table}}'].value_counts(normalize=True) * 100
+    freq_df = pd.DataFrame({
+        'Frequency': freq,
+        'Percentage': pct,
+        'Cumulative Freq': freq.cumsum(),
+        'Cumulative Pct': pct.cumsum()
+    })
+    print(f'\nFrequency Distribution for {{{table}}}:')
+    print(freq_df)
+    {% endif %}
+    {% endfor %}
+
+proc_freq_extensions:
+  template: |
+    # Additional statistical measures for PROC FREQ
+    def calculate_risk_ratios(table):
+        """Calculate risk ratios and odds ratios."""
+        if table.shape != (2, 2):
+            return None
+            
+        a = table.iloc[0,0]  # exposed, outcome
+        b = table.iloc[0,1]  # exposed, no outcome
+        c = table.iloc[1,0]  # unexposed, outcome
+        d = table.iloc[1,1]  # unexposed, no outcome
+        
+        # Risk ratio
+        risk_exposed = a / (a + b)
+        risk_unexposed = c / (c + d)
+        risk_ratio = risk_exposed / risk_unexposed
+        
+        # Odds ratio
+        odds_ratio = (a * d) / (b * c)
+        
+        return {
+            'risk_ratio': risk_ratio,
+            'odds_ratio': odds_ratio,
+            'risk_exposed': risk_exposed,
+            'risk_unexposed': risk_unexposed
+        }
+
+    def calculate_trend_test(table):
+        """Cochran-Armitage trend test."""
+        from scipy.stats import norm
+        
+        scores = np.arange(table.shape[1])
+        n_i = table.sum(axis=1)
+        p_i = np.sum(scores * table.T / n_i, axis=1)
+        p_0 = np.sum(scores * table.sum(axis=0)) / np.sum(n_i)
+        
+        # Calculate test statistic
+        numerator = np.sum(n_i * (p_i - p_0))
+        denominator = np.sqrt(np.sum(n_i * (p_i - p_0)**2))
+        z_stat = numerator / denominator
+        p_value = 2 * (1 - norm.cdf(abs(z_stat)))
+        
+        return z_stat, p_value
+
+proc_sort:
+  template: |
+    # Sort dataset by {{by_vars|join(', ')}}
+    {% if nodupkey %}
+    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
+    {{out_name}} = {{out_name}}.drop_duplicates(subset=[{{by_vars|join_quotes}}], keep='first')
+    {% elif nodup %}
+    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
+    {{out_name}} = {{out_name}}.drop_duplicates(keep='first')
+    {% else %}
+    {{out_name}} = {{data_name}}.sort_values([{{by_vars|join_quotes}}])
+    {% endif %}
+
+proc_univariate:
+  template: |
+    # Detailed statistical analysis
+    from scipy import stats
+    import numpy as np
+    
+    {% for var in variables %}
+    print(f'\nDetailed Analysis for {{var}}:')
+    data = {{dataset}}_df['{{var}}'].dropna()
+    
+    # Basic statistics
+    desc = data.describe()
+    print('\nBasic Statistics:')
+    print(desc)
+    
+    # Additional statistics
+    print('\nAdditional Statistics:')
+    print(f'Skewness: {stats.skew(data):.3f}')
+    print(f'Kurtosis: {stats.kurtosis(data):.3f}')
+    
+    # Location statistics
+    print('\nLocation Measures:')
+    print(f'Mode: {data.mode().iloc[0]:.3f}')
+    print(f'Median: {np.median(data):.3f}')
+    print(f'Mean: {np.mean(data):.3f}')
+    
+    # Robust statistics
+    print('\nRobust Statistics:')
+    q1, q3 = np.percentile(data, [25, 75])
+    iqr = q3 - q1
+    print(f'IQR: {iqr:.3f}')
+    print(f'MAD: {stats.median_abs_deviation(data):.3f}')
+    
+    # Extreme observations
+    print('\nExtreme Observations:')
+    print('Lowest 5:')
+    print(data.nsmallest(5))
+    print('\nHighest 5:')
+    print(data.nlargest(5))
+    
+    # Additional quantiles
+    quantiles = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+    print('\nQuantiles:')
+    for q in quantiles:
+        print(f'{q*100:>3.0f}%: {data.quantile(q):.3f}')
+    
+    # Tests for location
+    print('\nTests for Location:')
+    # Student's t-test (H0: mu = 0)
+    t_stat, t_pval = stats.ttest_1samp(data, 0)
+    print(f'Student t test:')
+    print(f't-statistic: {t_stat:.4f}')
+    print(f'p-value: {t_pval:.4f}')
+    
+    # Sign test
+    sign_stat, sign_pval = stats.wilcoxon(data)
+    print(f'\nSign test:')
+    print(f'statistic: {sign_stat:.4f}')
+    print(f'p-value: {sign_pval:.4f}')
+    
+    # Normality tests
+    print('\nTests for Normality:')
+    # Shapiro-Wilk test
+    w_stat, w_pval = stats.shapiro(data)
+    print(f'Shapiro-Wilk test:')
+    print(f'W-statistic: {w_stat:.4f}')
+    print(f'p-value: {w_pval:.4f}')
+    
+    # Kolmogorov-Smirnov test
+    ks_stat, ks_pval = stats.kstest(data, 'norm')
+    print(f'\nKolmogorov-Smirnov test:')
+    print(f'KS-statistic: {ks_stat:.4f}')
+    print(f'p-value: {ks_pval:.4f}')
+    
+    # Visualization
+    plt.figure(figsize=(12, 8))
+    
+    # Histogram with density
+    plt.subplot(221)
+    sns.histplot(data, kde=True)
+    plt.title('Distribution')
+    
+    # Box plot
+    plt.subplot(222)
+    sns.boxplot(y=data)
+    plt.title('Box Plot')
+    
+    # Q-Q plot
+    plt.subplot(223)
+    stats.probplot(data, dist='norm', plot=plt)
+    plt.title('Q-Q Plot')
+    
+    # Stem-and-leaf plot (text-based)
+    plt.subplot(224)
+    plt.axis('off')
+    stem_leaf = stats.stem_leaf_plot(data)
+    plt.text(0.1, 0.5, str(stem_leaf), family='monospace')
+    plt.title('Stem-and-Leaf Plot')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Additional robust statistics
+    def calculate_trimmed_stats(data, trim_percent=10):
+        """Calculate trimmed statistics."""
+        from scipy.stats import trim_mean
+        trim_prop = trim_percent / 100
+        trimmed_mean = trim_mean(data, trim_prop)
+        
+        # Calculate Winsorized mean
+        lower = np.percentile(data, trim_percent)
+        upper = np.percentile(data, 100 - trim_percent)
+        winsorized = np.clip(data, lower, upper)
+        winsorized_mean = np.mean(winsorized)
+        
+        return {
+            'trimmed_mean': trimmed_mean,
+            'winsorized_mean': winsorized_mean
+        }
+    
+    def calculate_quantile_ci(data, q=0.5, alpha=0.05):
+        """Calculate confidence intervals for quantiles."""
+        n = len(data)
+        j = int(n * q - 1.96 * np.sqrt(n * q * (1 - q)))
+        k = int(n * q + 1.96 * np.sqrt(n * q * (1 - q)))
+        sorted_data = np.sort(data)
+        return sorted_data[max(0, j)], sorted_data[min(n-1, k)]
+    
+    robust_stats = calculate_trimmed_stats(data)
+    print('\nRobust Statistics:')
+    print(f'10% Trimmed Mean: {robust_stats["trimmed_mean"]:.3f}')
+    print(f'10% Winsorized Mean: {robust_stats["winsorized_mean"]:.3f}')
+    
+    # Confidence intervals for quantiles
+    print('\nQuantile Confidence Intervals (95%):')
+    for q in [0.25, 0.5, 0.75]:
+        ci_lower, ci_upper = calculate_quantile_ci(data, q)
+        print(f'{q*100}th Percentile: ({ci_lower:.3f}, {ci_upper:.3f})')
+    {% endfor %}
+
+proc_ttest:
+  template: |
+    # Enhanced t-test analysis
+    from scipy import stats
+    import numpy as np
+    
+    {% if one_sample %}
+    # One-sample t-test
+    data = {{dataset}}_df['{{var}}'].dropna()
+    mean = np.mean(data)
+    std = np.std(data, ddof=1)
+    n = len(data)
+    std_err = std / np.sqrt(n)
+    
+    # Calculate t-statistic and p-value
+    t_stat, p_value = stats.ttest_1samp(data, {{mu0}})
+    
+    # Calculate confidence interval
+    t_crit = stats.t.ppf(0.975, df=n-1)  # 95% CI
+    ci_lower = mean - t_crit * std_err
+    ci_upper = mean + t_crit * std_err
+    
+    print('\nOne-Sample T-Test Results:')
+    print(f'Variable: {{var}}')
+    print(f'N: {n}')
+    print(f'Mean: {mean:.4f}')
+    print(f'Std Dev: {std:.4f}')
+    print(f'Std Err: {std_err:.4f}')
+    print(f't-statistic: {t_stat:.4f}')
+    print(f'p-value: {p_value:.4f}')
+    print(f'95% CI: ({ci_lower:.4f}, {ci_upper:.4f})')
+    
+    {% elif paired %}
+    # Paired t-test
+    var1_data = {{dataset}}_df['{{var1}}'].dropna()
+    var2_data = {{dataset}}_df['{{var2}}'].dropna()
+    
+    # Calculate paired differences
+    diff = var1_data - var2_data
+    mean_diff = np.mean(diff)
+    std_diff = np.std(diff, ddof=1)
+    n = len(diff)
+    std_err = std_diff / np.sqrt(n)
+    
+    t_stat, p_value = stats.ttest_rel(var1_data, var2_data)
+    
+    # Calculate confidence interval for difference
+    t_crit = stats.t.ppf(0.975, df=n-1)
+    ci_lower = mean_diff - t_crit * std_err
+    ci_upper = mean_diff + t_crit * std_err
+    
+    print('\nPaired T-Test Results:')
+    print(f'Variables: {{var1}} - {{var2}}')
+    print(f'N: {n}')
+    print(f'Mean Difference: {mean_diff:.4f}')
+    print(f'Std Dev: {std_diff:.4f}')
+    print(f'Std Err: {std_err:.4f}')
+    print(f't-statistic: {t_stat:.4f}')
+    print(f'p-value: {p_value:.4f}')
+    print(f'95% CI: ({ci_lower:.4f}, {ci_upper:.4f})')
+    
+    {% else %}
+    # Independent t-test
+    group1 = {{dataset}}_df[{{dataset}}_df['{{group_var}}'] == {{group1_value}}]['{{var}}'].dropna()
+    group2 = {{dataset}}_df[{{dataset}}_df['{{group_var}}'] == {{group2_value}}]['{{var}}'].dropna()
+    
+    # Test for equality of variances
+    f_stat, var_p_value = stats.levene(group1, group2)
+    equal_var = var_p_value > 0.05
+    
+    # Perform t-test
+    t_stat, p_value = stats.ttest_ind(group1, group2, equal_var=equal_var)
+    
+    print('\nIndependent T-Test Results:')
+    print(f'Variable: {{var}} by {{group_var}}')
+    print(f'Group 1 N: {len(group1)}')
+    print(f'Group 2 N: {len(group2)}')
+    print(f'Group 1 Mean: {np.mean(group1):.4f}')
+    print(f'Group 2 Mean: {np.mean(group2):.4f}')
+    print(f'Equal Variances: {equal_var}')
+    print(f't-statistic: {t_stat:.4f}')
+    print(f'p-value: {p_value:.4f}')
+    {% endif %}
+
+proc_reg:
+  template: |
+    # Enhanced regression analysis with model selection and diagnostics
+    from sklearn.linear_model import LinearRegression
+    from sklearn.feature_selection import RFE
+    from sklearn.metrics import r2_score, mean_squared_error
+    import statsmodels.api as sm
+    import numpy as np
+    
+    class ModelSelection:
+        def __init__(self, X, y):
+            self.X = X
+            self.y = y
+            self.n = len(y)
+            self.p = X.shape[1]
+        
+        def forward_selection(self, significance_level=0.05):
+            """Forward stepwise selection."""
+            selected = []
+            remaining = list(range(self.p))
+            
+            while remaining:
+                best_pvalue = float('inf')
+                best_feature = None
+                
+                for feature in remaining:
+                    candidates = selected + [feature]
+                    X_subset = self.X[:, candidates]
+                    model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
+                    pvalues = model.pvalues[1:]  # Exclude constant
+                    max_pvalue = max(pvalues)
+                    
+                    if max_pvalue < best_pvalue:
+                        best_pvalue = max_pvalue
+                        best_feature = feature
+                
+                if best_pvalue < significance_level:
+                    selected.append(best_feature)
+                    remaining.remove(best_feature)
+                else:
+                    break
+                    
+            return selected
+        
+        def backward_selection(self, significance_level=0.05):
+            """Backward stepwise selection."""
+            selected = list(range(self.p))
+            
+            while selected:
+                X_subset = self.X[:, selected]
+                model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
+                pvalues = model.pvalues[1:]  # Exclude constant
+                max_pvalue = max(pvalues)
+                
+                if max_pvalue >= significance_level:
+                    worst_feature = selected[pvalues.argmax()]
+                    selected.remove(worst_feature)
+                else:
+                    break
+                    
+            return selected
+        
+        def stepwise_selection(self, significance_level=0.05):
+            """Stepwise selection (forward with backward elimination)."""
+            selected = []
+            remaining = list(range(self.p))
+            
+            while remaining:
+                # Forward step
+                best_pvalue = float('inf')
+                best_feature = None
+                
+                for feature in remaining:
+                    candidates = selected + [feature]
+                    X_subset = self.X[:, candidates]
+                    model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
+                    pvalues = model.pvalues[1:]
+                    max_pvalue = max(pvalues)
+                    
+                    if max_pvalue < best_pvalue:
+                        best_pvalue = max_pvalue
+                        best_feature = feature
+                
+                if best_pvalue < significance_level:
+                    selected.append(best_feature)
+                    remaining.remove(best_feature)
+                    
+                    # Backward step
+                    while True:
+                        X_subset = self.X[:, selected]
+                        model = sm.OLS(self.y, sm.add_constant(X_subset)).fit()
+                        pvalues = model.pvalues[1:]
+                        max_pvalue = max(pvalues)
+                        
+                        if max_pvalue >= significance_level:
+                            worst_feature = selected[pvalues.argmax()]
+                            selected.remove(worst_feature)
+                            remaining.append(worst_feature)
+                        else:
+                            break
+                else:
+                    break
+                    
+            return selected
+    
+    # Prepare data
+    X = {{dataset}}_df[{{predictors|join_quotes}}]
+    y = {{dataset}}_df['{{target}}']
+    
+    # Model selection if specified
+    {% if selection_method %}
+    selector = ModelSelection(X.values, y.values)
+    if '{{selection_method}}' == 'forward':
+        selected_features = selector.forward_selection()
+    elif '{{selection_method}}' == 'backward':
+        selected_features = selector.backward_selection()
+    else:  # stepwise
+        selected_features = selector.stepwise_selection()
+    
+    # Update predictors based on selection
+    selected_predictors = [X.columns[i] for i in selected_features]
+    X = X[selected_predictors]
+    print('\nSelected Features:')
+    print(selected_predictors)
+    {% endif %}
+    
+    # Fit final model
+    model = sm.OLS(y, sm.add_constant(X)).fit()
+    
+    # Basic statistics
+    print('\nModel Summary:')
+    print(model.summary())
+    
+    # Advanced diagnostics
+    def calculate_influence_stats(model):
+        """Calculate influence statistics."""
+        influence = model.get_influence()
+        
+        # DFBETAS
+        dfbetas = influence.dfbetas
+        print('\nDFBETAS Summary:')
+        for i, var in enumerate(['const'] + X.columns.tolist()):
+            print(f'{var}:')
+            print(f'  Max: {dfbetas[:, i].max():.4f}')
+            print(f'  Min: {dfbetas[:, i].min():.4f}')
+        
+        # DFFITS
+        dffits = influence.dffits
+        print('\nDFFITS Summary:')
+        print(f'Max: {dffits.max():.4f}')
+        print(f'Min: {dffits.min():.4f}')
+        
+        # Cook's Distance
+        cooks_d = influence.cooks_distance[0]
+        print('\nCook\'s Distance Summary:')
+        print(f'Max: {cooks_d.max():.4f}')
+        print(f'Mean: {cooks_d.mean():.4f}')
+        
+        return dfbetas, dffits, cooks_d
+    
+    def calculate_collinearity_diagnostics(X):
+        """Calculate collinearity diagnostics."""
+        # Correlation matrix
+        corr_matrix = X.corr()
+        
+        # Variance Inflation Factors
+        X_with_const = sm.add_constant(X)
+        vif_data = pd.DataFrame()
+        vif_data["Variable"] = X_with_const.columns
+        vif_data["VIF"] = [variance_inflation_factor(X_with_const.values, i) 
+                          for i in range(X_with_const.shape[1])]
+        
+        # Condition number
+        eigenvals = np.linalg.eigvals(X_with_const.T.dot(X_with_const))
+        condition_number = np.sqrt(max(eigenvals) / min(eigenvals))
+        
+        return corr_matrix, vif_data, condition_number
+    
+    # Calculate and print diagnostics
+    print('\nInfluence Statistics:')
+    dfbetas, dffits, cooks_d = calculate_influence_stats(model)
+    
+    print('\nCollinearity Diagnostics:')
+    corr_matrix, vif_data, condition_number = calculate_collinearity_diagnostics(X)
+    print('\nCorrelation Matrix:')
+    print(corr_matrix)
+    print('\nVariance Inflation Factors:')
+    print(vif_data)
+    print(f'\nCondition Number: {condition_number:.4f}')
+    
+    # Diagnostic plots
+    plt.figure(figsize=(15, 10))
+    
+    # Residuals vs Fitted
+    plt.subplot(221)
+    plt.scatter(model.fittedvalues, model.resid)
+    plt.axhline(y=0, color='r', linestyle='--')
+    plt.xlabel('Fitted values')
+    plt.ylabel('Residuals')
+    plt.title('Residuals vs Fitted')
+    
+    # Q-Q plot
+    plt.subplot(222)
+    stats.probplot(model.resid, dist="norm", plot=plt)
+    plt.title('Normal Q-Q')
+    
+    # Scale-Location
+    plt.subplot(223)
+    plt.scatter(model.fittedvalues, np.sqrt(np.abs(model.resid)))
+    plt.xlabel('Fitted values')
+    plt.ylabel('√|Residuals|')
+    plt.title('Scale-Location')
+    
+    # Cook's distance
+    plt.subplot(224)
+    plt.stem(range(len(cooks_d)), cooks_d, markerfmt=',')
+    plt.axhline(y=4/len(y), color='r', linestyle='--', label='Threshold')
+    plt.xlabel('Obs. number')
+    plt.ylabel("Cook's distance")
+    plt.title("Cook's Distance")
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+proc_corr:
+  template: |
+    # Calculate correlations
+    {% if variables %}
+    corr_matrix = {{dataset}}_df[[{{variables|join_quotes}}]].corr()
+    print('\nCorrelation Matrix:')
+    print(corr_matrix)
+    
+    # Create correlation heatmap
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0)
+    plt.title('Correlation Heatmap')
+    plt.tight_layout()
+    plt.show()
+    {% endif %}
+
+data_step:
+  template: |
+    # Data step operations
+    {% if input_dataset %}
+    {{output_dataset}}_df = {{input_dataset}}_df.copy()
+    {% else %}
+    {{output_dataset}}_df = pd.DataFrame()
+    {% endif %}
+    
+    {% if where_clause %}
+    {{output_dataset}}_df = {{output_dataset}}_df[{{where_clause}}]
+    {% endif %}
+    
+    {% if drop_vars %}
+    {{output_dataset}}_df = {{output_dataset}}_df.drop(columns=[{{drop_vars|join_quotes}}])
+    {% endif %}
+    
+    {% if keep_vars %}
+    {{output_dataset}}_df = {{output_dataset}}_df[[{{keep_vars|join_quotes}}]]
+    {% endif %}
+    
+    {% if rename_dict %}
+    {{output_dataset}}_df = {{output_dataset}}_df.rename(columns={{rename_dict}})
+    {% endif %}
+
+  by_group_processing:
+    template: |
+      class ByGroupProcessor:
+          def __init__(self, df, by_vars):
+              self.df = df
+              self.by_vars = by_vars
+              self.grouped = df.groupby(by_vars)
+              self._first = self._create_first_last_flags('first')
+              self._last = self._create_first_last_flags('last')
+          
+          def _create_first_last_flags(self, flag_type):
+              """Create FIRST. and LAST. flags for BY groups."""
+              if flag_type == 'first':
+                  return self.grouped.cumcount() == 0
+              else:
+                  return self.grouped.cumcount() == (self.grouped.size() - 1)
+          
+          def process(self, func):
+              """Process data by group."""
+              return self.grouped.apply(func)
+          
+          @property
+          def first(self):
+              """Get FIRST. flag for current observation."""
+              return self._first
+          
+          @property
+          def last(self):
+              """Get LAST. flag for current observation."""
+              return self._last
+
+  infile:
+    template: |
+      class InfileReader:
+          def __init__(self, file_path, **options):
+              self.file_path = file_path
+              self.options = options
+              
+          def read(self):
+              """Read external file based on options."""
+              if self.options.get('delimiter') == ' ':
+                  # Fixed-width file
+                  return pd.read_fwf(
+                      self.file_path,
+                      widths=self.options.get('widths'),
+                      names=self.options.get('names')
+                  )
+              else:
+                  # Delimited file
+                  return pd.read_csv(
+                      self.file_path,
+                      sep=self.options.get('delimiter', ','),
+                      names=self.options.get('names'),
+                      skiprows=self.options.get('skiprows', 0)
+                  )
+
+sql:
+  template: |
+    # SQL operations
+    {% for stmt in statements %}
+    {% if stmt.type == 'select' %}
+    # SELECT statement
+    {% if stmt.joins %}
+    # Handle JOINs
+    {% for join in stmt.joins %}
+    {% if loop.first %}
+    result_df = {{join.left_table}}_df.merge(
+        {{join.right_table}}_df,
+        how='{{join.type}}',
+        left_on=[{{join.left_keys|join_quotes}}],
+        right_on=[{{join.right_keys|join_quotes}}]
+    )
+    {% else %}
+    result_df = result_df.merge(
+        {{join.right_table}}_df,
+        how='{{join.type}}',
+        left_on=[{{join.left_keys|join_quotes}}],
+        right_on=[{{join.right_keys|join_quotes}}]
+    )
+    {% endif %}
+    {% endfor %}
+    {% else %}
+    result_df = {{stmt.table_df}}
+    {% endif %}
+    
+    {% if stmt.where_clause %}
+    result_df = result_df[{{stmt.where_clause}}]
+    {% endif %}
+    
+    {% if stmt.group_by %}
+    result_df = result_df.groupby([{{stmt.group_by_list|join_quotes}}])
+    {% if stmt.agg_funcs %}
+    result_df = result_df.agg({{stmt.agg_funcs}})
+    {% endif %}
+    {% endif %}
+    
+    {% if stmt.having %}
+    result_df = result_df[{{stmt.having}}]
+    {% endif %}
+    
+    {% if stmt.order_by %}
+    result_df = result_df.sort_values(
+        [{{stmt.sort_cols_list|join_quotes}}],
+        ascending=[{{stmt.ascending_list|join(', ')}}]
+    )
+    {% endif %}
+    
+    {% if stmt.window_funcs %}
+    # Apply window functions
+    {% for window in stmt.window_funcs %}
+    result_df['{{window.name}}'] = result_df.groupby([{{window.partition_by|join_quotes}}])[{{window.column}}].transform('{{window.func}}')
+    {% endfor %}
+    {% endif %}
+    
+    {% elif stmt.type == 'create_table' %}
+    # CREATE TABLE statement
+    {{stmt.output_table_df}} = result_df.copy()
+    {% endif %}
+    {% endfor %}
+
+libname:
+  template: |
+    # Define library path
+    {{lib_name}}_path = {{lib_path|repr}}
+    os.makedirs({{lib_name}}_path, exist_ok=True)
+    
+    def read_{{lib_name}}_dataset(name: str) -> pd.DataFrame:
+        """Read dataset from {{lib_name}} library."""
+        try:
+            path = os.path.join({{lib_name}}_path, f'{name}.csv')
+            return pd.read_csv(path)
+        except Exception as e:
+            print(f'Error reading {name}: {e}')
+            return pd.DataFrame()
+
+ods:
+  template: |
+    {% if graphics %}
+    # Configure matplotlib for high-quality output
+    plt.style.use('seaborn')
+    plt.rcParams.update({
+        'figure.figsize': (10, 6),
+        'figure.dpi': 100,
+        'savefig.dpi': 300,
+        'font.size': 10,
+        'axes.titlesize': 12,
+        'axes.labelsize': 10,
+        'axes.grid': True
+    })
+    sns.set_theme(style='whitegrid')
+    {% endif %}
+
+# Add more templates for other PROC types...
+
+proc_print:
+  template: |
+    # Display dataset contents
+    {% if variables %}
+    display_cols = [{{variables|join_quotes}}]
+    print('\nDataset Contents (Selected Columns):')
+    print({{dataset}}_df[display_cols]{% if nobs %}.head({{nobs}}){% endif %})
+    {% else %}
+    print('\nDataset Contents:')
+    print({{dataset}}_df{% if nobs %}.head({{nobs}}){% endif %})
+    {% endif %}
+    
+    {% if summary %}
+    print('\nDataset Summary:')
+    print({{dataset}}_df.info())
+    {% endif %}
+
+proc_report:
+  template: |
+    # Generate detailed report
+    import pandas as pd
+    from typing import Any, Dict
+    
+    class ReportBuilder:
+        def __init__(self, data: pd.DataFrame):
+            self.data = data.copy()
+            self.compute_funcs = {}
+            self.breaks = []
+            self.summaries = {}
+        
+        def add_compute_block(self, name: str, func: Callable):
+            self.compute_funcs[name] = func
+        
+        def add_break(self, var: str, summary_funcs: Dict[str, str]):
+            self.breaks.append(var)
+            self.summaries[var] = summary_funcs
+        
+        def generate(self) -> pd.DataFrame:
+            result = self.data.copy()
+            
+            # Apply compute blocks
+            for col, func in self.compute_funcs.items():
+                result[col] = result.apply(func, axis=1)
+            
+            # Handle breaks and summaries
+            if self.breaks:
+                groups = result.groupby(self.breaks)
+                for var, funcs in self.summaries.items():
+                    summary = groups.agg(funcs)
+                    # Add summary rows
+                    result = pd.concat([result, summary])
+            
+            return result
+    
+    # Initialize report
+    report = ReportBuilder({{dataset}}_df)
+    
+    {% if compute_blocks %}
+    # Add compute blocks
+    {% for block in compute_blocks %}
+    report.add_compute_block('{{block.name}}', lambda row: {{block.computation}})
+    {% endfor %}
+    {% endif %}
+    
+    {% if breaks %}
+    # Add breaks and summaries
+    {% for break in breaks %}
+    report.add_break('{{break.var}}', {{break.summaries}})
+    {% endfor %}
+    {% endif %}
+    
+    # Generate and display report
+    result_df = report.generate()
+    
+    {% if order_vars %}
+    result_df = result_df.sort_values([{{order_vars|join_quotes}}])
+    {% endif %}
+    
+    print('\nDetailed Report:')
+    print(result_df{% if nobs %}.head({{nobs}}){% endif %})
+
+proc_format:
+  template: |
+    class Format:
+        def __init__(self, name: str):
+            self.name = name
+            self.value_map = {}
+            self.ranges = []
+            self.picture_spec = None
+            
+        def add_value(self, value: Any, label: str):
+            self.value_map[value] = label
+            
+        def add_range(self, start: float, end: float, label: str):
+            self.ranges.append((start, end, label))
+            
+        def set_picture(self, spec: str):
+            self.picture_spec = spec
+            
+        def format_value(self, value: Any) -> str:
+            if self.picture_spec:
+                return f'{value:{self.picture_spec}}'
+            
+            if self.ranges:
+                for start, end, label in self.ranges:
+                    if start <= value <= end:
+                        return label
+                        
+            return self.value_map.get(value, str(value))
+    
+    # Create format
+    {{format_name}} = Format('{{format_name}}')
+    
+    {% if values %}
+    # Add individual values
+    {% for value, label in values.items() %}
+    {{format_name}}.add_value({{value}}, {{label|repr}})
+    {% endfor %}
+    {% endif %}
+    
+    {% if ranges %}
+    # Add ranges
+    {% for range in ranges %}
+    {{format_name}}.add_range({{range.start}}, {{range.end}}, {{range.label|repr}})
+    {% endfor %}
+    {% endif %}
+    
+    {% if picture %}
+    # Set picture specification
+    {{format_name}}.set_picture('{{picture}}')
+    {% endif %}
+
+proc_sgplot:
+  template: |
+    # Create visualization
+    plt.figure(figsize=(10, 6))
+    
+    {% if scatter %}
+    sns.scatterplot(data={{dataset}}_df, x='{{x_var}}', y='{{y_var}}'{% if group_var %}, hue='{{group_var}}'{% endif %})
+    {% endif %}
+    
+    {% if reg %}
+    sns.regplot(data={{dataset}}_df, x='{{x_var}}', y='{{y_var}}',
+        scatter_kws={'alpha': 0.5},
+        line_kws={'color': 'red'})
+    {% endif %}
+    
+    {% if histogram %}
+    sns.histplot(data={{dataset}}_df, x='{{x_var}}', bins={{bins|default(30)}})
+    {% endif %}
+    
+    plt.title('{{title|default(plot_type + " of " + y_var + " vs " + x_var)}}')
+    plt.xlabel('{{x_label|default(x_var)}}')
+    plt.ylabel('{{y_label|default(y_var)}}')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+macro:
+  template: |
+    def {{macro_name}}({{python_params}}):
+        """
+        Python function converted from SAS macro {{macro_name}}.
+        {% if docstring %}
+        {{docstring}}
+        {% endif %}
+        """
+        {{body|indent(8)}}
+
+macro_let:
+  template: |
+    {% if is_scan %}
+    {{var_name}} = {{list_var}}.split()[{{index}}]
+    {% elif is_eval %}
+    {{var_name}} = {{expr}}
+    {% elif is_numeric %}
+    {{var_name}} = {{value}}
+    {% else %}
+    {{var_name}} = {{value|repr}}
+    {% endif %}
+
+filename:
+  template: |
+    # Define file reference
+    {{fileref}}_path = {{filepath|repr}}
+    
+    def read_{{fileref}}(encoding='utf-8'):
+        """Read contents of {{fileref}} file."""
+        try:
+            with open({{fileref}}_path, 'r', encoding=encoding) as f:
+                return f.read()
+        except Exception as e:
+            print(f'Error reading {{{fileref}}_path}: {e}')
+            return None
+
+title_footnote:
+  template: |
+    {% if type == 'title' %}
+    plt.title({{text|repr}})
+    {% else %}
+    plt.figtext(0.99, 0.01, {{text|repr}}, ha='right', va='bottom', style='italic')
+    {% endif %}
+
+# Helper templates for expressions and conditions
+sas_expression:
+  template: |
+    {% if function %}
+    {{function}}({{arguments|join(', ')}})
+    {% else %}
+    {{expression}}
+    {% endif %}
+
+where_clause:
+  template: |
+    {% for condition in conditions %}
+    {{condition}}{% if not loop.last %} & {% endif %}
+    {% endfor %}
+
+null_data_step:
+  template: |
+    # Null data step for data manipulation without output dataset
+    {% for statement in statements %}
+    {{statement}}
+    {% endfor %}
+
+# Add these missing templates...
+
+sql_condition:
+  template: |
+    {% if operator %}
+    {{left_operand}} {{operator}} {{right_operand}}
+    {% else %}
+    {{expression}}
+    {% endif %}
+
+sql_expression:
+  template: |
+    {% if function %}
+    {{function}}({{arguments|join(', ')}})
+    {% elif case_when %}
+    np.select([{{conditions|join(', ')}}], [{{values|join(', ')}}], default={{default|default('np.nan')}})
+    {% else %}
+    {{expression}}
+    {% endif %}
+
+complex_sql:
+  template: |
+    # Complex SQL operation
+    {% for step in steps %}
+    # Step {{loop.index}}: {{step.description}}
+    {{step.code}}
+    {% endfor %}
+
+macro_condition:
+  template: |
+    {% if comparison %}
+    {{left_operand}} {{operator}} {{right_operand}}
+    {% else %}
+    {{condition}}
+    {% endif %}
+
+macro_action:
+  template: |
+    {% if assignment %}
+    {{variable}} = {{value}}
+    {% elif function_call %}
+    {{function}}({{arguments|join(', ')}})
+    {% else %}
+    {{action}}
+    {% endif %}
+
+macro_statement:
+  template: |
+    {% if type == 'if' %}
+    if {{condition}}:
+        {{action|indent(4)}}
+    {% elif type == 'do' %}
+    {% for stmt in statements %}
+    {{stmt}}
+    {% endfor %}
+    {% else %}
+    {{statement}}
+    {% endif %}
+
+ods_graphics:
+  template: |
+    # Configure graphics settings
+    plt.style.use('seaborn')
+    plt.rcParams.update({
+        'figure.figsize': ({{width|default(10)}}, {{height|default(6)}}),
+        'figure.dpi': {{dpi|default(100)}},
+        'savefig.dpi': {{output_dpi|default(300)}},
+        'font.size': {{font_size|default(10)}},
+        'axes.titlesize': {{title_size|default(12)}},
+        'axes.labelsize': {{label_size|default(10)}},
+        'axes.grid': True
+    })
+    {% if style %}
+    sns.set_theme(style='{{style}}')
+    {% endif %}
+
+format:
+  template: |
+    # Define custom format
+    def format_{{name}}(value):
+        """Apply {{name}} format to value."""
+        {% if numeric %}
+        return f'{{"{"}}{value:{{format_spec}}}{{"}"}}'
+        {% else %}
+        return str(value).{{alignment}}({{width}}){% if truncate %}.[:{{width}}]{% endif %}
+
+sas_condition:
+  template: |
+    {% if complex %}
+    {% for condition in conditions %}
+    ({{condition}}){% if not loop.last %} {{logical_op}} {% endif %}
+    {% endfor %}
+    {% else %}
+    {{left_operand}} {{operator}} {{right_operand}}
+    {% endif %}
+
+macro_variable:
+  template: |
+    # Handle macro variable operations
+    {% if type == 'let' %}
+    {% if is_scan %}
+    {{var_name}} = {{list_var}}.split()[{{index}}]
+    {% elif is_eval %}
+    {{var_name}} = {{expr}}
+    {% elif is_numeric %}
+    {{var_name}} = {{value}}
+    {% else %}
+    {{var_name}} = {{value|repr}}
+    {% endif %}
+    {% elif type == 'global' %}
+    # Define global macro variable
+    global {{var_name}}
+    {{var_name}} = {{value|repr}}
+    {% elif type == 'symput' %}
+    # Set macro variable value
+    {{var_name}} = str({{value}})
+    {% elif type == 'symget' %}
+    # Get macro variable value
+    {{var_name}} = {{source_var}}
+    {% endif %}
+
+# Reorganize templates into categories
+proc:
+  analysis:
+    means: {...}
+    univariate: {...}
+    ttest: {...}
+    reg: {...}
+  frequency:
+    freq: {...}
+    corr: {...}
+  data:
+    sort: {...}
+    print: {...}
+    report: {...}
+  formatting:
+    format: {...}
+  graphics:
+    sgplot: {...}
+
+data_step:
+  standard: {...}
+  null: {...}
+  compute: {...}
+
+sql:
+  standard: {...}
+  complex: {...}
+  condition: {...}
+  expression: {...}
+
+macro:
+  definition: {...}
+  variable: {...}
+  statement: {...}
+  condition: {...}
+  action: {...}
+
+formatting:
+  format: {...}
+  picture: {...}
+  range: {...}
+  title: {...}
+  footnote: {...}
+
+output:
+  ods: {...}
+  graphics: {...}
+
+# Add these data step operations
+data_step_operations:
+  merge:
+    template: |
+      # MERGE operation
+      {{output_dataset}}_df = pd.merge(
+          {{left_dataset}}_df,
+          {{right_dataset}}_df,
+          how='{{merge_type}}',
+          on=[{{by_vars|join_quotes}}]
+      )
+
+  update:
+    template: |
+      # UPDATE operation
+      def update_dataset(base_df, update_df, by_vars):
+          """Update dataset values based on BY variables."""
+          merged = pd.merge(
+              base_df,
+              update_df,
+              on=by_vars,
+              how='left',
+              suffixes=('', '_update')
+          )
+          
+          # Update values where update exists
+          update_cols = [col for col in update_df.columns if col not in by_vars]
+          for col in update_cols:
+              merged[col] = merged[col + '_update'].fillna(merged[col])
+          
+          return merged.drop([col + '_update' for col in update_cols], axis=1)
+      
+      {{output_dataset}}_df = update_dataset(
+          {{base_dataset}}_df,
+          {{update_dataset}}_df,
+          [{{by_vars|join_quotes}}]
+      )
+
+  array:
+    template: |
+      # Array operations
+      class SASArray:
+          def __init__(self, df, columns, name):
+              self.df = df
+              self.columns = columns
+              self.name = name
+              self.validate_columns()
+          
+          def validate_columns(self):
+              missing = [col for col in self.columns if col not in self.df.columns]
+              if missing:
+                  raise ValueError(f"Columns not found: {missing}")
+          
+          def apply(self, func):
+              """Apply function to all array elements."""
+              for col in self.columns:
+                  self.df[col] = self.df[col].apply(func)
+          
+          def sum(self):
+              """Sum across array elements."""
+              return self.df[self.columns].sum(axis=1)
+          
+          def mean(self):
+              """Mean across array elements."""
+              return self.df[self.columns].mean(axis=1)
+      
+      {{array_name}} = SASArray(
+          {{dataset}}_df,
+          [{{columns|join_quotes}}],
+          '{{array_name}}'
+      )
+
+  do_loop:
+    template: |
+      # DO loop implementation
+      {% if type == 'iterative' %}
+      for {{var}} in range({{start}}, {{end}} + 1{% if by %}, {{by}}{% endif %}):
+          {{body|indent(4)}}
+      {% elif type == 'until' %}
+      {{var}} = {{start}}
+      while True:
+          {{body|indent(4)}}
+          if {{condition}}:
+              break
+          {{var}} += {% if by %}{{by}}{% else %}1{% endif %}
+      {% elif type == 'while' %}
+      {{var}} = {{start}}
+      while {{condition}}:
+          {{body|indent(4)}}
+          {{var}} += {% if by %}{{by}}{% else %}1{% endif %}
+      {% endif %}
+
+  retain:
+    template: |
+      # RETAIN statement implementation
+      class RetainedVariable:
+          def __init__(self, initial_value=None):
+              self.value = initial_value
+          
+          def update(self, new_value):
+              if pd.notna(new_value):
+                  self.value = new_value
+              return self.value
+      
+      {% for var in retained_vars %}
+      {{var}}_retained = RetainedVariable({{initial_values.get(var, 'None')}})
+      {{dataset}}_df['{{var}}'] = {{dataset}}_df['{{var}}'].apply({{var}}_retained.update)
+      {% endfor %}
+
+sql_operations:
+  subquery:
+    template: |
+      # Subquery operations
+      def execute_subquery(main_df, sub_df, condition):
+          """Execute a subquery operation."""
+          if condition.get('type') == 'exists':
+              return main_df[main_df['{{key}}'].isin(sub_df['{{sub_key}}'])]
+          elif condition.get('type') == 'not_exists':
+              return main_df[~main_df['{{key}}'].isin(sub_df['{{sub_key}}'])]
+          return main_df
+
+  set_operations:
+    template: |
+      # Set operations
+      def perform_set_operation(left_df, right_df, operation):
+          """Perform set operations between two dataframes."""
+          if operation == 'union':
+              return pd.concat([left_df, right_df]).drop_duplicates()
+          elif operation == 'union_all':
+              return pd.concat([left_df, right_df])
+          elif operation == 'intersect':
+              return pd.merge(left_df, right_df, how='inner')
+          elif operation == 'except':
+              return left_df[~left_df.isin(right_df).all(axis=1)]
+
+  window_functions:
+    template: |
+      # Window function implementations
+      def apply_window_function(df, func_type, partition_cols=None, order_cols=None):
+          """Apply window functions similar to SAS."""
+          if partition_cols:
+              grouped = df.groupby(partition_cols)
+              if func_type == 'lag':
+                  return grouped.shift(1)
+              elif func_type == 'lead':
+                  return grouped.shift(-1)
+              elif func_type == 'first':
+                  return grouped.transform('first')
+              elif func_type == 'last':
+                  return grouped.transform('last')
+          return df
+
+  complex_joins:
+    template: |
+      # Handle complex join scenarios
+      def perform_complex_join(left_df, right_df, join_type, conditions):
+          """Execute complex join operations."""
+          if join_type == 'full_outer':
+              return pd.merge(left_df, right_df, how='outer', **conditions)
+          elif join_type == 'cross':
+              return pd.merge(left_df, right_df, how='cross')
+
+error_handling:
+  conversion_error:
+    template: |
+      class SASConversionError(Exception):
+          """Custom exception for SAS conversion errors."""
+          def __init__(self, message: str, sas_code: str, component_type: str):
+              self.message = message
+              self.sas_code = sas_code
+              self.component_type = component_type
+              super().__init__(f"{component_type} Error: {message}\nSAS Code: {sas_code}")
+
+  logging_setup:
+    template: |
+      import logging
+      from pathlib import Path
+      
+      def setup_conversion_logging(
+          log_file: str = 'sas_conversion.log',
+          level: str = 'INFO'
+      ):
+          """Setup logging for SAS conversion process."""
+          log_dir = Path('logs')
+          log_dir.mkdir(exist_ok=True)
+          
+          logging.basicConfig(
+              level=getattr(logging, level.upper()),
+              format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+              handlers=[
+                  logging.FileHandler(log_dir / log_file),
+                  logging.StreamHandler()
+              ]
+          )
+
+datetime_formats:
+  template: |
+    from datetime import datetime, date, time
+    
+    class SASDateTimeFormatter:
+        """Handle SAS datetime format conversions."""
+        
+        # SAS date formats mapping to Python
+        DATE_FORMATS = {
+            'DATE': '%Y-%m-%d',
+            'DDMMYY': '%d%m%y',
+            'MMDDYY': '%m%d%y',
+            'YYMMDD': '%y%m%d',
+            'DATETIME': '%Y-%m-%d %H:%M:%S',
+            'TIME': '%H:%M:%S'
+        }
+        
+        @staticmethod
+        def format_date(value, sas_format: str) -> str:
+            """Convert date value to specified SAS format."""
+            py_format = SASDateTimeFormatter.DATE_FORMATS.get(
+                sas_format.upper(),
+                '%Y-%m-%d'
+            )
+            try:
+                if isinstance(value, (date, datetime)):
+                    return value.strftime(py_format)
+                return datetime.strptime(str(value), '%Y-%m-%d').strftime(py_format)
+            except Exception as e:
+                return str(value)
+
+macro_variable_handling:
+  array_macro:
+    template: |
+      class MacroArray:
+          """Handle array-like macro variables."""
+          def __init__(self, name: str, size: int):
+              self.name = name
+              self.size = size
+              self.values = [None] * size
+          
+          def set_value(self, index: int, value: Any):
+              if 0 <= index < self.size:
+                  self.values[index] = value
+          
+          def get_value(self, index: int) -> Any:
+              if 0 <= index < self.size:
+                  return self.values[index]
+              return None
+
+  indirect_reference:
+    template: |
+      def resolve_macro_reference(ref_name: str) -> str:
+          """Resolve indirect macro variable references."""
+          return globals().get(ref_name, f"&{ref_name}") 
+
+error_handling_extensions:
+  template: |
+    class SASValidationError(Exception):
+        """Validation error for SAS components."""
+        def __init__(self, message: str, component_type: str, details: Dict[str, Any]):
+            self.message = message
+            self.component_type = component_type
+            self.details = details
+            super().__init__(f"{component_type} Validation Error: {message}")
+
+    class ValidationRules:
+        @staticmethod
+        def validate_dataset_name(name: str) -> bool:
+            """Validate SAS dataset name."""
+            pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+            return bool(pattern.match(name))
+            
+        @staticmethod
+        def validate_variable_name(name: str) -> bool:
+            """Validate SAS variable name."""
+            pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+            max_length = 32
+            return bool(pattern.match(name)) and len(name) <= max_length
+
+macro_handling:
+  scope_management:
+    template: |
+      class MacroScope:
+          """Manage macro variable scoping."""
+          def __init__(self):
+              self.global_vars = {}
+              self.local_vars = {}
+              self.scope_stack = []
+
+          def push_scope(self):
+              """Create new local scope."""
+              self.scope_stack.append(self.local_vars.copy())
+              self.local_vars = {}
+
+          def pop_scope(self):
+              """Restore previous scope."""
+              if self.scope_stack:
+                  self.local_vars = self.scope_stack.pop()
+
+          def get_var(self, name: str) -> Any:
+              """Get macro variable value."""
+              return self.local_vars.get(name, self.global_vars.get(name))
+
+      # Initialize macro scope
+      macro_scope = MacroScope() 
+
+output_handling:
+  html_output:
+    template: |
+      def generate_html_report(df, title: str, filename: str):
+          """Generate HTML report similar to ODS HTML."""
+          import pandas as pd
+          
+          html_template = '''
+          <html>
+          <head>
+              <title>{title}</title>
+              <style>
+                  table {{ border-collapse: collapse; width: 100%; }}
+                  th, td {{ border: 1px solid black; padding: 8px; text-align: left; }}
+                  th {{ background-color: #f2f2f2; }}
+              </style>
+          </head>
+          <body>
+              <h1>{title}</h1>
+              {table}
+          </body>
+          </html>
+          '''
+          
+          table_html = df.to_html(classes='dataframe')
+          report_html = html_template.format(title=title, table=table_html)
+          
+          with open(filename, 'w') as f:
+              f.write(report_html)
+
+  pdf_output:
+    template: |
+      def generate_pdf_report(df, title: str, filename: str):
+          """Generate PDF report similar to ODS PDF."""
+          from reportlab.lib import colors
+          from reportlab.lib.pagesizes import letter
+          from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+          
+          doc = SimpleDocTemplate(filename, pagesize=letter)
+          elements = []
+          
+          # Convert DataFrame to table data
+          table_data = [df.columns.tolist()] + df.values.tolist()
+          table = Table(table_data)
+          table.setStyle(TableStyle([
+              ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+              ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+              ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+              ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+              ('FONTSIZE', (0, 0), (-1, 0), 14),
+              ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+              ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+              ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+              ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+              ('FONTSIZE', (0, 1), (-1, -1), 12),
+              ('GRID', (0, 0), (-1, -1), 1, colors.black)
+          ]))
+          elements.append(table)
+          doc.build(elements) 
+
+format_types:
+  template: |
+    class SASFormatters:
+        @staticmethod
+        def dollar_format(value, width=None, decimals=2):
+            """Format as currency."""
+            try:
+                formatted = f"${value:,.{decimals}f}"
+                if width:
+                    return formatted.rjust(width)
+                return formatted
+            except:
+                return str(value)
+        
+        @staticmethod
+        def percent_format(value, decimals=0):
+            """Format as percentage."""
+            try:
+                return f"{value:.{decimals}f}%"
+            except:
+                return str(value)
+        
+        @staticmethod
+        def comma_format(value, decimals=0):
+            """Format with commas."""
+            try:
+                return f"{value:,.{decimals}f}"
+            except:
+                return str(value)
+        
+        @staticmethod
+        def datetime_format(value, format_str):
+            """Format datetime values."""
+            try:
+                return value.strftime(format_str)
+            except:
+                return str(value) 
+
+data_step_extensions:
+  input_statement:
+    template: |
+      class InputParser:
+          """Parse input data according to SAS formats."""
+          def __init__(self, format_str: str):
+              self.format = self._parse_format(format_str)
+          
+          def _parse_format(self, format_str: str) -> List[Dict]:
+              """Parse SAS input format specification."""
+              formats = []
+              for spec in format_str.split():
+                  if '@' in spec:
+                      position, fmt = spec.split()
+                      formats.append({
+                          'position': int(position.replace('@', '')),
+                          'format': fmt
+                      })
+                  else:
+                      formats.append({'format': spec})
+              return formats
+          
+          def parse_line(self, line: str) -> Dict[str, Any]:
+              """Parse a line of input according to format."""
+              values = {}
+              current_pos = 0
+              
+              for fmt in self.format:
+                  if 'position' in fmt:
+                      current_pos = fmt['position'] - 1
+                  
+                  # Extract value based on format
+                  if '$' in fmt['format']:
+                      # Character format
+                      width = int(fmt['format'].replace('$', ''))
+                      values[f'col_{len(values)}'] = line[current_pos:current_pos+width].strip()
+                  else:
+                      # Numeric format
+                      width = int(fmt['format'])
+                      try:
+                          values[f'col_{len(values)}'] = float(line[current_pos:current_pos+width])
+                      except:
+                          values[f'col_{len(values)}'] = None
+                  
+                  current_pos += width
+              
+              return values
+
+  array_operations:
+    template: |
+      class SASArrayOperations:
+          """Enhanced array operations."""
+          def __init__(self, df: pd.DataFrame):
+              self.df = df
+              self.arrays = {}
+          
+          def define_array(self, name: str, variables: List[str], dim: int = None):
+              """Define a SAS-style array."""
+              if dim and len(variables) != dim:
+                  raise ValueError(f"Array dimension {dim} doesn't match number of variables {len(variables)}")
+              
+              self.arrays[name] = variables
+          
+          def array_operation(self, array_name: str, operation: str, *args, **kwargs):
+              """Perform operation on array elements."""
+              if array_name not in self.arrays:
+                  raise ValueError(f"Array {array_name} not defined")
+              
+              variables = self.arrays[array_name]
+              
+              if operation == 'sum':
+                  return self.df[variables].sum(axis=1)
+              elif operation == 'mean':
+                  return self.df[variables].mean(axis=1)
+              elif operation == 'min':
+                  return self.df[variables].min(axis=1)
+              elif operation == 'max':
+                  return self.df[variables].max(axis=1)
+              elif operation == 'apply':
+                  func = args[0] if args else kwargs.get('func')
+                  if not func:
+                      raise ValueError("Function required for apply operation")
+                  return self.df[variables].apply(func) 
+
+format_extensions:
+  numeric_formats:
+    template: |
+      class NumericFormats:
+          @staticmethod
+          def best(value: float, width: int = 12) -> str:
+              """BEST. format - choose best representation."""
+              if abs(value) < 0.0001 or abs(value) > 1e7:
+                  return f"{value:.{width-7}e}"
+              return f"{value:.{width-2}f}".rstrip('0').rstrip('.')
+          
+          @staticmethod
+          def hex(value: int, width: int = 8) -> str:
+              """Hexadecimal format."""
+              return f"{value:0{width}X}"
+          
+          @staticmethod
+          def binary(value: int, width: int = 8) -> str:
+              """Binary format."""
+              return f"{value:0{width}b}"
+
+  date_formats:
+    template: |
+      class DateFormats:
+          @staticmethod
+          def weekdate(date_value: datetime) -> str:
+              """WEEKDATE format."""
+              return date_value.strftime("%A, %B %d, %Y")
+          
+          @staticmethod
+          def monyy(date_value: datetime) -> str:
+              """MONYY format."""
+              return date_value.strftime("%b%y").upper()
+          
+          @staticmethod
+          def yyqc(date_value: datetime) -> str:
+              """YYQC format."""
+              quarter = (date_value.month - 1) // 3 + 1
+              return f"{date_value.strftime('%y')}Q{quarter}" 
+
+sql_window_functions:
+  template: |
+    class WindowFunctions:
+        @staticmethod
+        def rank(df: pd.DataFrame, partition_cols: List[str], order_cols: List[str]) -> pd.Series:
+            """Implement RANK function."""
+            return df.groupby(partition_cols)[order_cols].rank(method='min')
+            
+        @staticmethod
+        def dense_rank(df: pd.DataFrame, partition_cols: List[str], order_cols: List[str]) -> pd.Series:
+            """Implement DENSE_RANK function."""
+            return df.groupby(partition_cols)[order_cols].rank(method='dense')
+            
+        @staticmethod
+        def row_number(df: pd.DataFrame, partition_cols: List[str]) -> pd.Series:
+            """Implement ROW_NUMBER function."""
+            return df.groupby(partition_cols).cumcount() + 1
+            
+        @staticmethod
+        def ntile(df: pd.DataFrame, partition_cols: List[str], n: int) -> pd.Series:
+            """Implement NTILE function."""
+            return df.groupby(partition_cols).apply(
+                lambda x: pd.qcut(range(len(x)), n, labels=False) + 1
+            ) 
+
+data_step_functions:
+  template: |
+    class SASFunctions:
+        @staticmethod
+        def lag(series: pd.Series, n: int = 1) -> pd.Series:
+            """Implement LAG function."""
+            return series.shift(n)
+            
+        @staticmethod
+        def dif(series: pd.Series, n: int = 1) -> pd.Series:
+            """Implement DIF function."""
+            return series - series.shift(n)
+            
+        @staticmethod
+        def sum(series: pd.Series, reset_group: pd.Series = None) -> pd.Series:
+            """Implement SUM function with optional reset condition."""
+            if reset_group is None:
+                return series.cumsum()
+            return series.groupby(reset_group).cumsum() 
+
+format_extensions_additional:
+  template: |
+    class ExtendedFormats:
+        @staticmethod
+        def zd(value: int, width: int) -> str:
+            """Implement ZD. format (zero decimal)."""
+            return f"{value:0{width}d}"
+            
+        @staticmethod
+        def pd(value: int, width: int) -> str:
+            """Implement PD. format (packed decimal)."""
+            return f"{value:+0{width}d}"
+            
+        @staticmethod
+        def ib(value: int, width: int) -> str:
+            """Implement IB. format (integer binary)."""
+            return format(value, f"0{width}b")
+            
+        @staticmethod
+        def datetime_range(start: datetime, end: datetime, format: str = '%Y-%m-%d') -> List[str]:
+            """Generate datetime range with specified format."""
+            dates = pd.date_range(start, end)
+            return [d.strftime(format) for d in dates] 
+
+macro_processing_extensions:
+  template: |
+    class MacroProcessor:
+        def __init__(self):
+            self.global_symbols = {}
+            self.local_symbols = []
+            self.macro_functions = {}
+            
+        def define_macro(self, name: str, params: List[str], body: str):
+            """Define a macro function."""
+            self.macro_functions[name] = {
+                'params': params,
+                'body': body
+            }
+            
+        def resolve_macro_variable(self, name: str) -> str:
+            """Resolve macro variable value."""
+            # Check local scope first
+            for scope in reversed(self.local_symbols):
+                if name in scope:
+                    return scope[name]
+            # Then check global scope
+            return self.global_symbols.get(name)
+            
+        def execute_macro(self, name: str, args: Dict[str, Any]) -> str:
+            """Execute a macro function."""
+            if name not in self.macro_functions:
+                raise ValueError(f"Macro {name} not found")
+                
+            macro = self.macro_functions[name]
+            # Create new local scope
+            local_scope = dict(zip(macro['params'], args))
+            self.local_symbols.append(local_scope)
+            
+            try:
+                # Execute macro body
+                result = self._execute_macro_body(macro['body'])
+                return result
+            finally:
+                # Remove local scope
+                self.local_symbols.pop() 
+
+proc_extensions:
+  tabulate:
+    template: |
+      class TabulateBuilder:
+          """Handle complex tabulations like PROC TABULATE."""
+          def __init__(self, df: pd.DataFrame):
+              self.df = df
+              self.page_vars = []
+              self.row_vars = []
+              self.col_vars = []
+              self.statistics = []
+          
+          def add_page_var(self, var: str):
+              self.page_vars.append(var)
+          
+          def add_row_var(self, var: str):
+              self.row_vars.append(var)
+          
+          def add_col_var(self, var: str):
+              self.col_vars.append(var)
+          
+          def add_statistic(self, var: str, stat: str):
+              self.statistics.append((var, stat))
+          
+          def generate(self) -> pd.DataFrame:
+              """Generate tabulation."""
+              if not self.row_vars and not self.col_vars:
+                  raise ValueError("Must specify at least one row or column variable")
+              
+              # Create grouping
+              group_vars = self.row_vars + self.col_vars
+              if self.page_vars:
+                  group_vars = self.page_vars + group_vars
+              
+              # Calculate statistics
+              aggs = {}
+              for var, stat in self.statistics:
+                  aggs[f"{var}_{stat}"] = pd.NamedAgg(column=var, aggfunc=stat)
+              
+              result = self.df.groupby(group_vars).agg(**aggs)
+              
+              # Reshape if necessary
+              if self.col_vars:
+                  result = result.unstack(self.col_vars)
+              
+              return result
+
+  transpose:
+    template: |
+      class TransposeBuilder:
+          """Handle data transposition like PROC TRANSPOSE."""
+          def __init__(self, df: pd.DataFrame):
+              self.df = df
+              self.id_vars = []
+              self.value_vars = []
+              self.name_prefix = ""
+          
+          def set_id_vars(self, vars: List[str]):
+              self.id_vars = vars
+          
+          def set_value_vars(self, vars: List[str]):
+              self.value_vars = vars
+          
+          def set_name_prefix(self, prefix: str):
+              self.name_prefix = prefix
+          
+          def transpose(self) -> pd.DataFrame:
+              """Perform transposition."""
+              if not self.value_vars:
+                  self.value_vars = [col for col in self.df.columns 
+                                   if col not in self.id_vars]
+              
+              # Melt the dataframe
+              melted = pd.melt(self.df, 
+                             id_vars=self.id_vars,
+                             value_vars=self.value_vars)
+              
+              # Pivot the melted data
+              result = melted.pivot(index=self.id_vars[0] if self.id_vars else None,
+                                  columns='variable',
+                                  values='value')
+              
+              # Rename columns if prefix specified
+              if self.name_prefix:
+                  result.columns = [f"{self.name_prefix}{i+1}" 
+                                  for i in range(len(result.columns))]
+              
+              return result
+
+  compare:
+    template: |
+      class CompareBuilder:
+          """Compare datasets like PROC COMPARE."""
+          def __init__(self, base_df: pd.DataFrame, comp_df: pd.DataFrame):
+              self.base_df = base_df
+              self.comp_df = comp_df
+              self.by_vars = []
+              self.compare_vars = []
+          
+          def set_by_vars(self, vars: List[str]):
+              self.by_vars = vars
+          
+          def set_compare_vars(self, vars: List[str]):
+              self.compare_vars = vars
+          
+          def compare(self) -> Dict[str, Any]:
+              """Perform comparison."""
+              results = {
+                  'structure': self._compare_structure(),
+                  'values': self._compare_values(),
+                  'summary': {}
+              }
+              
+              # Calculate summary statistics
+              results['summary'] = {
+                  'matching_rows': self.matching_rows,
+                  'base_only_rows': self.base_only_rows,
+                  'comp_only_rows': self.comp_only_rows,
+                  'differing_values': self.differing_values
+              }
+              
+              return results
+          
+          def _compare_structure(self) -> Dict[str, List[str]]:
+              """Compare dataset structures."""
+              base_cols = set(self.base_df.columns)
+              comp_cols = set(self.comp_df.columns)
+              
+              return {
+                  'matching_vars': list(base_cols & comp_cols),
+                  'base_only_vars': list(base_cols - comp_cols),
+                  'comp_only_vars': list(comp_cols - base_cols)
+              }
+          
+          def _compare_values(self) -> pd.DataFrame:
+              """Compare dataset values."""
+              if not self.by_vars:
+                  # Compare all rows
+                  merged = self.base_df.merge(
+                      self.comp_df,
+                      how='outer',
+                      indicator=True
+                  )
+              else:
+                  # Compare by specified variables
+                  merged = self.base_df.merge(
+                      self.comp_df,
+                      on=self.by_vars,
+                      how='outer',
+                      indicator=True
+                  )
+              
+              # Store comparison metrics
+              self.matching_rows = (merged['_merge'] == 'both').sum()
+              self.base_only_rows = (merged['_merge'] == 'left_only').sum()
+              self.comp_only_rows = (merged['_merge'] == 'right_only').sum()
+              
+              # Compare values for matching rows
+              if self.matching_rows > 0:
+                  compare_vars = (self.compare_vars if self.compare_vars 
+                                else list(set(self.base_df.columns) & 
+                                        set(self.comp_df.columns)))
+                  
+                  differences = []
+                  for var in compare_vars:
+                      if var in merged.columns:
+                          base_val = merged[f"{var}_x"]
+                          comp_val = merged[f"{var}_y"]
+                          diff_mask = base_val != comp_val
+                          if diff_mask.any():
+                              differences.append({
+                                  'variable': var,
+                                  'differences': diff_mask.sum(),
+                                  'max_diff': (base_val - comp_val).abs().max()
+                                  if pd.api.types.is_numeric_dtype(base_val) else None
+                              })
+                  
+                  self.differing_values = len(differences)
+                  return pd.DataFrame(differences)
+              
+              return pd.DataFrame() 
+
+data_step_functions_additional:
+  template: |
+    class SASDataFunctions:
+        # String Functions
+        @staticmethod
+        def substr(string: str, start: int, length: int = None) -> str:
+            """SUBSTR function."""
+            if start < 1:
+                start = 1
+            start = start - 1  # Convert to 0-based indexing
+            if length is None:
+                return string[start:]
+            return string[start:start + length]
+        
+        @staticmethod
+        def scan(string: str, n: int, delim: str = ' ') -> str:
+            """SCAN function."""
+            try:
+                return string.split(delim)[n - 1]  # Convert to 0-based indexing
+            except IndexError:
+                return ''
+        
+        @staticmethod
+        def trim(string: str) -> str:
+            """TRIM function."""
+            return string.strip()
+        
+        @staticmethod
+        def left(string: str) -> str:
+            """LEFT function."""
+            return string.lstrip()
+        
+        @staticmethod
+        def right(string: str) -> str:
+            """RIGHT function."""
+            return string.rstrip()
+        
+        # Date Functions
+        @staticmethod
+        def today() -> datetime:
+            """TODAY function."""
+            return datetime.now().date()
+        
+        @staticmethod
+        def date() -> datetime:
+            """DATE function."""
+            return datetime.now()
+        
+        @staticmethod
+        def mdy(month: int, day: int, year: int) -> datetime:
+            """MDY function."""
+            try:
+                return datetime(year, month, day)
+            except ValueError:
+                return None
+        
+        @staticmethod
+        def year(date_value: datetime) -> int:
+            """YEAR function."""
+            return date_value.year
+        
+        @staticmethod
+        def month(date_value: datetime) -> int:
+            """MONTH function."""
+            return date_value.month
+        
+        @staticmethod
+        def day(date_value: datetime) -> int:
+            """DAY function."""
+            return date_value.day
+        
+        # Numeric Functions
+        @staticmethod
+        def round(value: float, unit: float = 1) -> float:
+            """ROUND function."""
+            return round(value / unit) * unit
+        
+        @staticmethod
+        def int(value: float) -> int:
+            """INT function."""
+            return int(np.floor(value))
+        
+        @staticmethod
+        def ceil(value: float) -> int:
+            """CEIL function."""
+            return int(np.ceil(value))
+        
+        @staticmethod
+        def floor(value: float) -> int:
+            """FLOOR function."""
+            return int(np.floor(value))
+        
+        @staticmethod
+        def mod(dividend: float, divisor: float) -> float:
+            """MOD function."""
+            return dividend % divisor
+        
+        # Array Functions
+        @staticmethod
+        def dim(array: List) -> int:
+            """DIM function."""
+            return len(array)
+        
+        @staticmethod
+        def hbound(array: List) -> int:
+            """HBOUND function."""
+            return len(array)
+        
+        @staticmethod
+        def lbound(array: List) -> int:
+            """LBOUND function."""
+            return 1  # SAS arrays are 1-based 
+
+format_extensions_complete:
+  template: |
+    class CompleteFormatting:
+        # Time Formats
+        @staticmethod
+        def time(value: datetime, format: str = 'HHMM') -> str:
+            """TIME format."""
+            format_map = {
+                'HHMM': '%H:%M',
+                'HHMMSS': '%H:%M:%S',
+                'HOUR': '%H',
+                'MINUTE': '%M',
+                'SECOND': '%S'
+            }
+            return value.strftime(format_map.get(format, '%H:%M'))
+        
+        # Custom Picture Formats
+        @staticmethod
+        def picture_format(value: Any, template: str) -> str:
+            """Custom picture format."""
+            try:
+                return template.format(value)
+            except:
+                return str(value)
+        
+        # International Formats
+        @staticmethod
+        def nlnum(value: float, locale: str = 'en_US') -> str:
+            """International number format."""
+            import locale as loc
+            try:
+                loc.setlocale(loc.LC_ALL, locale)
+                return loc.format_string('%.2f', value)
+            finally:
+                loc.setlocale(loc.LC_ALL, '')
+        
+        @staticmethod
+        def nldate(value: datetime, locale: str = 'en_US') -> str:
+            """International date format."""
+            import locale as loc
+            try:
+                loc.setlocale(loc.LC_ALL, locale)
+                return value.strftime('%x')
+            finally:
+                loc.setlocale(loc.LC_ALL, '')
+        
+        # Specialized Numeric Formats
+        @staticmethod
+        def comma(value: float, decimals: int = 0) -> str:
+            """COMMA format."""
+            return f"{value:,.{decimals}f}"
+        
+        @staticmethod
+        def dollar(value: float, decimals: int = 2) -> str:
+            """DOLLAR format."""
+            return f"${value:,.{decimals}f}"
+        
+        @staticmethod
+        def percent(value: float, decimals: int = 0) -> str:
+            """PERCENT format."""
+            return f"{value*100:.{decimals}f}%"
+
+error_handling_system:
+  template: |
+    class SASErrorHandler:
+        """Complete error handling and validation system."""
+        def __init__(self):
+            self.errors = []
+            self.warnings = []
+            self.notes = []
+            self.log_file = None
+        
+        def set_log_file(self, path: str):
+            """Set log file path."""
+            self.log_file = path
+            with open(path, 'w') as f:
+                f.write("SAS to Python Conversion Log\n")
+                f.write("=" * 50 + "\n\n")
+        
+        def add_error(self, component: str, message: str, details: Dict = None):
+            """Add error message."""
+            error = {
+                'timestamp': datetime.now(),
+                'component': component,
+                'message': message,
+                'details': details or {}
+            }
+            self.errors.append(error)
+            self._write_to_log('ERROR', error)
+        
+        def add_warning(self, component: str, message: str, details: Dict = None):
+            """Add warning message."""
+            warning = {
+                'timestamp': datetime.now(),
+                'component': component,
+                'message': message,
+                'details': details or {}
+            }
+            self.warnings.append(warning)
+            self._write_to_log('WARNING', warning)
+        
+        def add_note(self, component: str, message: str, details: Dict = None):
+            """Add informational note."""
+            note = {
+                'timestamp': datetime.now(),
+                'component': component,
+                'message': message,
+                'details': details or {}
+            }
+            self.notes.append(note)
+            self._write_to_log('NOTE', note)
+        
+        def _write_to_log(self, level: str, message: Dict):
+            """Write message to log file."""
+            if self.log_file:
+                with open(self.log_file, 'a') as f:
+                    f.write(f"{message['timestamp']} - {level}: {message['component']}\n")
+                    f.write(f"  {message['message']}\n")
+                    if message['details']:
+                        f.write(f"  Details: {message['details']}\n")
+                    f.write("\n")
+        
+        def get_summary(self) -> Dict[str, int]:
+            """Get summary of messages."""
+            return {
+                'errors': len(self.errors),
+                'warnings': len(self.warnings),
+                'notes': len(self.notes)
+            }
+        
+        def has_errors(self) -> bool:
+            """Check if there are any errors."""
+            return len(self.errors) > 0
+
+    class SASValidator:
+        """Validation rules for SAS components."""
+        @staticmethod
+        def validate_dataset_name(name: str) -> bool:
+            """Validate SAS dataset name."""
+            if not name:
+                return False
+            pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+            return bool(pattern.match(name)) and len(name) <= 32
+        
+        @staticmethod
+        def validate_variable_name(name: str) -> bool:
+            """Validate SAS variable name."""
+            if not name:
+                return False
+            pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+            return bool(pattern.match(name)) and len(name) <= 32
+        
+        @staticmethod
+        def validate_format(format_str: str) -> bool:
+            """Validate SAS format specification."""
+            pattern = re.compile(r'^(\$?[A-Za-z]+)(\d+)\.?(\d+)?$')
+            return bool(pattern.match(format_str))
+        
+        @staticmethod
+        def validate_date_value(value: Any) -> bool:
+            """Validate date value."""
+            if isinstance(value, (datetime, date)):
+                return True
+            try:
+                pd.to_datetime(value)
+                return True
+            except:
+                return False
+
+utility_functions:
+  template: |
+    class SASUtilities:
+        @staticmethod
+        def compress(string: str, chars: str = None, modifiers: str = None) -> str:
+            """COMPRESS function."""
+            if not string:
+                return ""
+            
+            if chars is None and modifiers is None:
+                return string.replace(" ", "")
+            
+            if modifiers:
+                if 'd' in modifiers.lower():  # digits
+                    string = ''.join(c for c in string if not c.isdigit())
+                if 'a' in modifiers.lower():  # letters
+                    string = ''.join(c for c in string if not c.isalpha())
+                if 's' in modifiers.lower():  # spaces
+                    string = ''.join(c for c in string if not c.isspace())
+            
+            if chars:
+                string = ''.join(c for c in string if c not in chars)
+            
+            return string
+        
+        @staticmethod
+        def tranwrd(string: str, from_str: str, to_str: str) -> str:
+            """TRANWRD function."""
+            if not string or not from_str:
+                return string
+            return string.replace(from_str, to_str)
+        
+        @staticmethod
+        def find(string: str, substring: str, start: int = 1) -> int:
+            """FIND function."""
+            if not string or not substring:
+                return 0
+            try:
+                # Convert to 0-based indexing for Python
+                pos = string.index(substring, start - 1)
+                # Convert back to 1-based indexing for SAS compatibility
+                return pos + 1
+            except ValueError:
+                return 0
+        
+        @staticmethod
+        def soundex(string: str) -> str:
+            """SOUNDEX function."""
+            if not string:
+                return ""
+            
+            # Basic implementation of the Soundex algorithm
+            string = string.upper()
+            soundex = string[0]
+            
+            # Soundex digit mappings
+            mappings = {
+                'BFPV': '1',
+                'CGJKQSXZ': '2',
+                'DT': '3',
+                'L': '4',
+                'MN': '5',
+                'R': '6'
+            }
+            
+            # Convert remaining letters to digits
+            for char in string[1:]:
+                for key in mappings:
+                    if char in key:
+                        soundex += mappings[key]
+                        break
+            
+            # Remove duplicates and pad/truncate to 4 characters
+            soundex = soundex[0] + ''.join(c for i, c in enumerate(soundex[1:])
+                                         if i == 0 or c != soundex[1:][i-1])
+            return (soundex + '0' * 4)[:4]
+
+proc_dataset_operations:
+  template: |
+    class DatasetOperations:
+        """Handle dataset operations like PROC DATASETS."""
+        @staticmethod
+        def append(base_df: pd.DataFrame, data_df: pd.DataFrame, force: bool = False) -> pd.DataFrame:
+            """Append datasets like PROC APPEND."""
+            if not force and not set(data_df.columns).issubset(set(base_df.columns)):
+                raise ValueError("Data columns don't match base columns")
+            return pd.concat([base_df, data_df[base_df.columns]], ignore_index=True)
+        
+        @staticmethod
+        def modify(df: pd.DataFrame, modifications: List[Dict]) -> pd.DataFrame:
+            """Modify dataset attributes."""
+            result = df.copy()
+            for mod in modifications:
+                if mod['type'] == 'rename':
+                    result = result.rename(columns=mod['mapping'])
+                elif mod['type'] == 'label':
+                    # Store labels in dataframe attributes
+                    result.attrs['labels'] = result.attrs.get('labels', {})
+                    result.attrs['labels'].update(mod['labels'])
+                elif mod['type'] == 'format':
+                    result.attrs['formats'] = result.attrs.get('formats', {})
+                    result.attrs['formats'].update(mod['formats'])
+            return result
+        
+        @staticmethod
+        def delete(lib_path: str, dataset_names: List[str]) -> None:
+            """Delete datasets."""
+            for name in dataset_names:
+                path = os.path.join(lib_path, f"{name}.csv")
+                if os.path.exists(path):
+                    os.remove(path)
+
+macro_variable_processing:
+  template: |
+    class MacroVariableProcessor:
+        """Enhanced macro variable processing."""
+        def __init__(self):
+            self.variables = {}
+            self.functions = {
+                'upcase': str.upper,
+                'lowcase': str.lower,
+                'substr': lambda x, *args: x[args[0]-1:args[0]-1+args[1]],
+                'trim': str.strip,
+                'left': str.lstrip,
+                'right': str.rstrip
+            }
+        
+        def resolve(self, text: str) -> str:
+            """Resolve macro variables in text."""
+            result = text
+            # Find all &variable references
+            pattern = r'&([a-zA-Z_][a-zA-Z0-9_]*)'
+            matches = re.finditer(pattern, text)
+            for match in matches:
+                var_name = match.group(1)
+                if var_name in self.variables:
+                    result = result.replace(f"&{var_name}", str(self.variables[var_name]))
+            return result
+        
+        def evaluate(self, expression: str) -> Any:
+            """Evaluate macro expressions."""
+            # Replace macro variables
+            resolved = self.resolve(expression)
+            # Evaluate Python expression
+            try:
+                return eval(resolved, {"__builtins__": {}}, self.functions)
+            except:
+                return expression
+
+output_handling_enhanced:
+  template: |
+    class OutputManager:
+        """Enhanced output handling."""
+        def __init__(self):
+            self.destinations = {}
+            self.styles = {}
+            self.current_style = None
+        
+        def add_destination(self, name: str, path: str, type: str = 'html'):
+            """Add output destination."""
+            self.destinations[name] = {
+                'path': path,
+                'type': type,
+                'active': True
+            }
+        
+        def close_destination(self, name: str):
+            """Close output destination."""
+            if name in self.destinations:
+                self.destinations[name]['active'] = False
+        
+        def set_style(self, style_dict: Dict):
+            """Set output style."""
+            self.current_style = style_dict
+        
+        def write_output(self, content: Any, destination: str = None):
+            """Write content to destination."""
+            if destination and destination in self.destinations:
+                dest = self.destinations[destination]
+                if dest['active']:
+                    if dest['type'] == 'html':
+                        self._write_html(content, dest['path'])
+                    elif dest['type'] == 'pdf':
+                        self._write_pdf(content, dest['path'])
+                    elif dest['type'] == 'rtf':
+                        self._write_rtf(content, dest['path'])
+        
+        def _write_html(self, content, path):
+            """Write HTML output."""
+            if isinstance(content, pd.DataFrame):
+                content.to_html(path, **self.current_style or {})
+            else:
+                with open(path, 'w') as f:
+                    f.write(str(content))

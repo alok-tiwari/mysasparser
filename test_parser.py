@@ -8,6 +8,8 @@ import os
 import argparse
 import tempfile
 from pathlib import Path
+import unittest
+from T_sas_python_converter_template import SASPythonConverterTemplate
 
 def test_parser():
     # Test SAS Parser
@@ -237,6 +239,94 @@ def main():
     
     if args.clean:
         cleanup_chromadb()
+
+class TestSASPythonConverter(unittest.TestCase):
+    def setUp(self):
+        self.converter = SASPythonConverterTemplate()
+
+    def test_proc_means(self):
+        sas_code = """
+        PROC MEANS data=mydata;
+            var age income;
+        run;
+        """
+        params = {
+            'dataset': 'mydata',
+            'variables': ['age', 'income']
+        }
+        python_code = self.converter.convert_proc('means', params)
+        self.assertIn('mydata_df', python_code)
+        self.assertIn("['age', 'income']", python_code)
+
+    def test_data_step(self):
+        sas_code = """
+        DATA newdata;
+            set mydata;
+            where age > 18;
+        run;
+        """
+        params = {
+            'output_dataset': 'newdata',
+            'input_dataset': 'mydata',
+            'where_clause': 'age > 18'
+        }
+        python_code = self.converter.convert_data_step(params)
+        self.assertIn('newdata_df', python_code)
+        self.assertIn('mydata_df', python_code)
+        self.assertIn('age > 18', python_code)
+
+    def test_sql(self):
+        sas_code = """
+        PROC SQL;
+            SELECT name, age
+            FROM mydata
+            WHERE age > 18;
+        quit;
+        """
+        statements = [{
+            'type': 'select',
+            'table_df': 'mydata_df',
+            'where_clause': 'age > 18'
+        }]
+        python_code = self.converter.convert_sql(statements)
+        self.assertIn('mydata_df', python_code)
+        self.assertIn('age > 18', python_code)
+
+    def test_macro(self):
+        sas_code = """
+        %let var = value;
+        """
+        params = {
+            'var_name': 'var',
+            'value': 'value',
+            'is_numeric': False
+        }
+        python_code = self.converter.convert_macro('let', params)
+        self.assertIn('var = ', python_code)
+        self.assertIn("'value'", python_code)
+
+    def test_format(self):
+        sas_code = """
+        PROC FORMAT;
+            value agefmt
+                0-17 = 'Child'
+                18-64 = 'Adult'
+                65-high = 'Senior';
+        run;
+        """
+        params = {
+            'format_name': 'agefmt',
+            'ranges': [
+                {'start': 0, 'end': 17, 'label': 'Child'},
+                {'start': 18, 'end': 64, 'label': 'Adult'},
+                {'start': 65, 'end': float('inf'), 'label': 'Senior'}
+            ]
+        }
+        python_code = self.converter.convert_format(params)
+        self.assertIn('agefmt', python_code)
+        self.assertIn('Child', python_code)
+        self.assertIn('Adult', python_code)
+        self.assertIn('Senior', python_code)
 
 if __name__ == "__main__":
     main()
