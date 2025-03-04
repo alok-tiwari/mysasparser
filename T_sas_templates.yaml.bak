@@ -58,8 +58,8 @@ proc_freq:
     print('\nChi-square test results:')
     print("Chi2 statistic: {:.4f}".format(chi2))
     print("p-value: {:.4f}".format(p_value))
-    print('Degrees of freedom: {}'\.format(dof))
-    print('Significant at α=0.05: {}'\.format(p_value < 0.05))
+    print('Degrees of freedom: '.format(dof))
+    print('Significant at α=0.05: '.format(p_value < 0.05))
     
     # Fisher's exact test (for 2x2 tables)
     if ctab.shape == (2, 2):
@@ -241,7 +241,7 @@ proc_ttest:
     
     print('\nOne-Sample T-Test Results:')
     print('Variable: {{var}}')
-    print('N: {}'\.format(n))
+    print('N: '.format(n))
     print('Mean: {:.4f}'.format(mean))
     print('Std Dev: {:.4f}'.format(std))
     print('Std Err: {:.4f}'.format(std_err))
@@ -270,7 +270,7 @@ proc_ttest:
     
     print('\nPaired T-Test Results:')
     print('Variables: {{var1}} - {{var2}}')
-    print('N: {}'\.format(n))
+    print('N: '.format(n))
     print('Mean Difference: {:.4f}'.format(mean_diff))
     print('Std Dev: {:.4f}'.format(std_diff))
     print('Std Err: {:.4f}'.format(std_err))
@@ -548,7 +548,7 @@ macro_definition:
             {{ content|indent(4) }}
         {% if error_handling %}
         except Exception as e:
-            print("Error in macro : {}"\.format(name, str(e)))
+            print("Error in macro : ".format(name, str(e)))
             return None
         {% endif %}
 
@@ -852,7 +852,7 @@ filename:
             with open({{fileref}}_path, 'r', encoding=encoding) as f:
                 return f.read()
         except Exception as e:
-            print('Error reading {{{fileref}}_path}: {}'\.format(e))
+            print('Error reading {{{fileref}}_path}: '.format(e))
             return None
 
 title_footnote:
@@ -949,7 +949,7 @@ macro_statement:
 ods_graphics:
   template: |
     # Configure graphics settings
-    plt.style.use('.format() == 'do' %)seaborn')
+    plt.style.use('.format type == 'do' %)seaborn')
     plt.rcParams.update({
         'figure.figsize': ({{width|default(10)}}, {{height|default(6)}}),
         'figure.dpi': {{dpi|default(100)}},
@@ -1107,7 +1107,7 @@ data_step_operations:
           def validate_columns(self):
               missing = [col for col in self.columns if col not in self.df.columns]
               if missing:
-                  raise ValueError("Columns not found: {}"\.format(missing))
+                  raise ValueError("Columns not found: ".format(missing))
           
           def apply(self, func):
               """Apply function to all array elements."""
@@ -1227,7 +1227,7 @@ error_handling:
               self.message = message
               self.sas_code = sas_code
               self.component_type = component_type
-              super().__init__("{component_type} Error: {message}\nSAS Code: {}"\.format(sas_code))
+              super().__init__("{component_type} Error: {message}\nSAS Code: ".format(sas_code))
 
   logging_setup:
     template: |
@@ -1315,7 +1315,7 @@ error_handling_extensions:
             self.message = message
             self.component_type = component_type
             self.details = details
-            super().__init__("{component_type} Validation Error: {}"\.format(message))
+            super().__init__("{component_type} Validation Error: ".format(message))
 
     class ValidationRules:
         @staticmethod
