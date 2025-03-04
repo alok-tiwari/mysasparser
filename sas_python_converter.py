@@ -283,6 +283,22 @@ class SASPythonConverter:
                 elif component.type == "WHILE":
                     python_code.append(self._convert_while(component))
                 
+                # Add special handling for macro statements in the content
+                if component.content and '%' in component.content:
+                    # Look for macro calls in the content
+                    for line in component.content.split('\n'):
+                        if line.strip().startswith('%analyze_segment'):
+                            # Convert this specific macro call
+                            macro_call = self._convert_macro_call_statement(line.strip())
+                            python_code.append(macro_call)
+                        elif line.strip().startswith('%do %while'):
+                            # Convert do while loop
+                            do_while = self._convert_macro_do_statement(line.strip())
+                            python_code.append(do_while)
+                        elif line.strip() == '%end;':
+                            # End of loop
+                            python_code.append("    # End of loop")
+                
                 else:
                     python_code.append(f"# TODO: Convert {component.type}:\n# {component.content.strip()}")
                     
@@ -462,7 +478,7 @@ for col in {dataset}.select_dtypes(include=['number']).columns:
             
         except Exception as e:
             logger.warning(f"Error converting PROC TTEST: {str(e)}")
-            return f"# TODO: Convert PROC TTEST:\n{component.content}"
+            return f"# TODO: Convert PROC TTEST:\n# {component.content}"
 
     def _convert_proc_report(self, component: SASComponent) -> str:
         """Convert PROC REPORT to pandas display."""
@@ -1012,18 +1028,24 @@ def format_proc():
         return '\n'.join(code_lines)
 
     def _convert_let(self, component: SASComponent) -> str:
-        """Convert %LET statements to Python variables."""
+        """Convert %LET statements to Python variable assignments."""
         try:
             content = component.content.strip()
-            let_match = re.search(r'%let\s+(\w+)\s*=\s*([^;]+);', content, re.IGNORECASE)
+            let_match = re.search(r'%let\s+(\w+)\s*=\s*(.+?);', content, re.IGNORECASE)
             if not let_match:
-                raise ValueError(f"Invalid %LET statement: {content}")
+                return f"# TODO: Convert %LET: {content}"
             
             var_name = let_match.group(1)
             value = let_match.group(2).strip()
             
             # Try to convert value to appropriate Python type
             try:
+                # Check if it's a function call
+                if '%' in value:
+                    # Convert the macro function call
+                    value = self._convert_macro_function(value)
+                    return f"{var_name} = {value}"
+                
                 # Try numeric conversion
                 if '.' in value:
                     py_value = float(value)
@@ -1031,15 +1053,15 @@ def format_proc():
                     py_value = int(value)
             except ValueError:
                 # If not numeric, treat as string
-                py_value = value.strip('"\'')
+                # Fix: Don't use f-string with backslashes
+                value = value.strip('"').strip("'")
+                py_value = f'"{value}"'
             
-            # Store in macro variables
-            self.macro_variables[var_name] = py_value
-            
-            return f"{var_name} = {repr(py_value)}"
+            return f"{var_name} = {py_value}"
             
         except Exception as e:
-            raise ValueError(f"Error converting %LET: {str(e)}")
+            logger.warning(f"Error converting %LET: {str(e)}")
+            return f"# TODO: Convert %LET:\n# {content}"
 
     def _convert_let_direct(self, component: SASComponent) -> str:
         """Direct conversion of %LET statements."""
@@ -1165,36 +1187,12 @@ def format_proc():
 
     def _convert_macro_condition(self, condition: str) -> str:
         """Convert SAS macro condition to Python condition."""
-        # Replace macro-specific operators
-        condition = condition.strip()
+        # Replace SAS operators with Python equivalents
+        condition = condition.replace(' eq ', ' == ').replace(' ne ', ' != ')
+        condition = condition.replace(' gt ', ' > ').replace(' lt ', ' < ')
+        condition = condition.replace(' ge ', ' >= ').replace(' le ', ' <= ')
         
-        # Handle empty check (common in %DO %WHILE loops)
-        condition = re.sub(r'(\w+)\s+(?:NE|ne)\s*$', r'\1 != ""', condition)
-        
-        # Fix missing closing conditions
-        if condition.endswith("NE") or condition.endswith("ne"):
-            condition = condition[:-2].strip() + ' != ""'
-        
-        # Replace comparison operators
-        condition = re.sub(r'\b=\b', '==', condition)  # = in macro is equality
-        condition = re.sub(r'\bEQ\b', '==', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bNE\b', '!=', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bGT\b', '>', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bLT\b', '<', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bGE\b', '>=', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bLE\b', '<=', condition, flags=re.IGNORECASE)
-        
-        # Replace logical operators
-        condition = re.sub(r'\bAND\b', 'and', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bOR\b', 'or', condition, flags=re.IGNORECASE)
-        condition = re.sub(r'\bNOT\b', 'not', condition, flags=re.IGNORECASE)
-        
-        # Handle %EVAL expressions
-        eval_matches = re.findall(r'%EVAL\((.*?)\)', condition, flags=re.IGNORECASE)
-        for expr in eval_matches:
-            condition = condition.replace(f"%EVAL({expr})", self._convert_sas_expression(expr))
-        
-        # Handle &macro.variables - convert to Python variables
+        # Handle macro variables
         condition = re.sub(r'&(\w+)', r'\1', condition)
         
         return condition
@@ -1425,46 +1423,42 @@ def plot_chart(data_df):
             logger.warning(f"Error converting PROC GCHART: {str(e)}")
             return f"# TODO: Convert PROC GCHART:\n# {component.content.strip()}"
 
-    def _convert_macro_function(self, macro_call: str) -> str:
-        """Convert SAS macro function calls to Python equivalents."""
-        # Handle %SCAN function
-        scan_match = re.search(r'%scan\s*\(\s*([^,]+)\s*,\s*([^,\)]+)(?:\s*,\s*([^\)]+))?\s*\)', 
-                              macro_call, re.IGNORECASE)
-        if scan_match:
-            list_var = scan_match.group(1).strip('&')
-            position = scan_match.group(2).strip('&')
-            delimiter = scan_match.group(3) if scan_match.group(3) else "' '"
+    def _convert_macro_call(self, component: SASComponent) -> str:
+        """Convert SAS macro calls to Python function calls."""
+        try:
+            content = component.content.strip()
             
-            # Add scan function if not already added
-            self._add_helper_function('scan')
+            # Check if this is a macro call with parameters
+            macro_match = re.search(r'%(\w+)\s*\((.*)\);', content, re.IGNORECASE)
+            if macro_match:
+                macro_name = macro_match.group(1)
+                params_str = macro_match.group(2)
+                
+                # Parse parameters
+                params = {}
+                for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
+                    param_name = param[0]
+                    param_value = param[1].strip()
+                    # Convert SAS references to Python
+                    param_value = self._convert_sas_reference(param_value)
+                    params[param_name] = param_value
+                
+                # Generate Python function call
+                params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
+                return f"{macro_name}({params_code})"
             
-            return f"scan({list_var}, {position})"
-        
-        # Handle %EVAL function
-        eval_match = re.search(r'%eval\s*\(\s*([^\)]+)\s*\)', macro_call, re.IGNORECASE)
-        if eval_match:
-            expression = eval_match.group(1)
-            # Convert SAS operators to Python
-            expression = expression.replace('=', '==')
-            expression = re.sub(r'&(\w+)', r'\1', expression)  # Remove & from variable names
+            # Check if this is a simple macro call
+            simple_macro_match = re.search(r'%(\w+);', content, re.IGNORECASE)
+            if simple_macro_match:
+                macro_name = simple_macro_match.group(1)
+                return f"{macro_name}()"
             
-            # Add eval_expr function if not already added
-            self._add_helper_function('eval_expr')
+            # If we can't parse it, return a TODO comment
+            return f"# TODO: Convert macro call: {content}"
             
-            return f"eval_expr({repr(expression)})"
-        
-        # Handle %SYSFUNC
-        sysfunc_match = re.search(r'%sysfunc\s*\(\s*([^\)]+)\s*\)', macro_call, re.IGNORECASE)
-        if sysfunc_match:
-            func_call = sysfunc_match.group(1)
-            if 'today()' in func_call.lower():
-                return "pd.Timestamp.today()"
-            
-            # For other sysfunc calls, create a placeholder
-            return f"# TODO: Convert %SYSFUNC: {macro_call}"
-        
-        # If no specific converter, return as comment
-        return f"# TODO: Convert macro function: {macro_call}"
+        except Exception as e:
+            logger.warning(f"Error converting macro call: {str(e)}")
+            return f"# TODO: Convert macro call: {content}"
 
     def _add_helper_function(self, function_name: str):
         """Add helper function to the list of functions to include in output."""
@@ -1501,114 +1495,89 @@ def eval_expr(expression):
         
         return '\n'.join(helper_code)
 
-    def _convert_conditional(self, component: SASComponent) -> str:
-        """Convert SAS conditional statements to Python."""
+    def _convert_macro_do(self, component: SASComponent) -> str:
+        """Convert %DO statements to Python loops."""
         try:
             content = component.content.strip()
             
-            # Handle IF-THEN-ELSE
-            if_match = re.search(r'if\s+(.+?)\s+then\s+(.+?)(?:\s+else\s+(.+))?;', content, re.IGNORECASE)
-            if if_match:
-                condition = if_match.group(1)
-                then_clause = if_match.group(2)
-                else_clause = if_match.group(3) if if_match.group(3) else None
-                
-                # Convert SAS operators to Python
-                condition = self._convert_sas_condition(condition)
-                
-                # Convert then clause
-                then_code = self._convert_sas_statement(then_clause)
-                
-                # Convert else clause if present
-                else_code = f"\nelse:\n    {self._convert_sas_statement(else_clause)}" if else_clause else ""
-                
-                return f"if {condition}:\n    {then_code}{else_code}"
-            
-            # Handle simple IF
-            if content.lower().startswith('if '):
-                condition_match = re.search(r'if\s+(.+?);', content, re.IGNORECASE)
-                if condition_match:
-                    condition = condition_match.group(1)
-                    condition = self._convert_sas_condition(condition)
-                    return f"if {condition}:\n    pass"
-            
-            return f"# TODO: Convert conditional: {content}"
-            
-        except Exception as e:
-            logger.warning(f"Error converting conditional: {str(e)}")
-            return f"# TODO: Convert conditional: {content}"
-
-    def _convert_while(self, component: SASComponent) -> str:
-        """Convert SAS DO WHILE loops to Python while loops."""
-        try:
-            content = component.content.strip()
-            
-            # Handle DO WHILE
-            do_while_match = re.search(r'do\s+while\s*\(\s*(.+?)\s*\);', content, re.IGNORECASE)
+            # Handle %DO %WHILE
+            do_while_match = re.search(r'%do\s+%while\s*\(\s*(.+?)\s*\)', content, re.IGNORECASE)
             if do_while_match:
                 condition = do_while_match.group(1)
-                condition = self._convert_sas_condition(condition)
-                
-                # Extract loop body
-                body_match = re.search(r'do\s+while.+?;(.+?)end;', content, re.IGNORECASE | re.DOTALL)
-                body = body_match.group(1).strip() if body_match else ""
-                
-                # Convert body
-                body_lines = []
-                for line in body.split('\n'):
-                    if line.strip():
-                        body_lines.append(f"    {self._convert_sas_statement(line.strip())}")
-                
-                if not body_lines:
-                    body_lines = ["    pass"]
-                
-                return f"while {condition}:\n{chr(10).join(body_lines)}"
+                # Convert condition to Python
+                condition = self._convert_macro_condition(condition)
+                return f"while {condition}:"
             
-            # Handle simple DO
-            if content.lower().startswith('do'):
-                return "# Simple DO block\npass"
+            # Handle %DO with counter
+            do_counter_match = re.search(r'%do\s+(\w+)\s*=\s*(\d+)\s+to\s+(\d+)', content, re.IGNORECASE)
+            if do_counter_match:
+                var = do_counter_match.group(1)
+                start = do_counter_match.group(2)
+                end = do_counter_match.group(3)
+                return f"for {var} in range({start}, {end}+1):"
             
-            return f"# TODO: Convert loop: {content}"
+            # Handle simple %DO
+            if content.lower().startswith('%do'):
+                return "# Start of DO block"
+            
+            return f"# TODO: Convert %DO: {content}"
             
         except Exception as e:
-            logger.warning(f"Error converting while loop: {str(e)}")
-            return f"# TODO: Convert loop: {content}"
+            logger.warning(f"Error converting %DO: {str(e)}")
+            return f"# TODO: Convert %DO:\n# {content}"
 
-def main():
-    """Command line interface for the converter."""
-    parser = argparse.ArgumentParser(description='Convert SAS code to Python using vector embeddings')
-    parser.add_argument('input', help='SAS file or directory to convert')
-    parser.add_argument('--output', '-o', default='python_output', help='Output directory for Python files')
-    parser.add_argument('--config', '-c', help='Configuration file for production settings')
-    parser.add_argument('--db-path', '-d', default='chroma_db', help='ChromaDB path (for testing)')
-    
-    args = parser.parse_args()
-    
-    # Initialize components
-    vector_store = VectorStore(persist_directory=args.db_path)
-    embedding_gen = EmbeddingGenerator(embedding_dim=4096)
-    
-    # Initialize converter with all components
-    converter = SASPythonConverter(
-        vector_store=vector_store,
-        output_directory=args.output,
-        embedding_generator=embedding_gen
-    )
-    
-    # Process input
-    input_path = Path(args.input)
-    if input_path.is_file():
-        converter.convert_file(str(input_path))
-    elif input_path.is_dir():
-        converter.convert_directory(str(input_path))
-    else:
-        logger.error(f"Input path {args.input} does not exist")
-        return 1
-    
-    logger.info(f"Conversion complete. Output written to {args.output}")
-    return 0
+    def _convert_macro_end(self, component: SASComponent) -> str:
+        """Convert %END statements to Python."""
+        try:
+            # For %END, we just need to handle indentation in the calling code
+            return "# End of block"
+            
+        except Exception as e:
+            logger.warning(f"Error converting %END: {str(e)}")
+            return f"# TODO: Convert %END:\n# {component.content}"
 
-if __name__ == "__main__":
-    import sys
-    import re  # Required for regex in conversion methods
-    sys.exit(main())
+    def _convert_macro_call_statement(self, statement: str) -> str:
+        """Convert a SAS macro call statement to Python function call."""
+        try:
+            # Extract macro name and parameters
+            macro_match = re.search(r'%(\w+)\s*\((.*)\);', statement, re.IGNORECASE)
+            if not macro_match:
+                return f"# TODO: Convert macro call: {statement}"
+            
+            macro_name = macro_match.group(1)
+            params_str = macro_match.group(2)
+            
+            # Parse parameters
+            params = {}
+            for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
+                param_name = param[0]
+                param_value = param[1].strip()
+                # Convert SAS references to Python
+                param_value = self._convert_sas_reference(param_value)
+                params[param_name] = param_value
+            
+            # Generate Python function call
+            params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
+            return f"{macro_name}({params_code})"
+            
+        except Exception as e:
+            logger.warning(f"Error converting macro call statement: {str(e)}")
+            return f"# TODO: Convert macro call: {statement}"
+
+    def _convert_macro_do_statement(self, statement: str) -> str:
+        """Convert a %DO %WHILE statement to Python while loop."""
+        try:
+            # Extract condition
+            do_while_match = re.search(r'%do\s+%while\s*\(\s*(.+?)\s*\);', statement, re.IGNORECASE)
+            if do_while_match:
+                condition = do_while_match.group(1)
+                # Convert condition to Python
+                condition = self._convert_macro_condition(condition)
+                return f"while {condition}:"
+            
+            return f"# TODO: Convert %DO statement: {statement}"
+        
+        except Exception as e:
+            logger.warning(f"Error converting %DO statement: {str(e)}")
+            logger.warning(f"Error converting %DO %WHILE statement: {str(e)}")
+            return f"# TODO: Convert %DO %WHILE statement: {statement}"

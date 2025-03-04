@@ -34,14 +34,12 @@ noprint_df = pd.DataFrame()
 
 # Initialize normal dataset
 normal_df = pd.DataFrame()
-# TODO: Convert %LET:
-# %let alpha = 0.05;
-# TODO: Convert %LET:
-# %let min_obs = 1000;
 # TODO: Implement PROC format
 def format_proc():
     """Python equivalent of PROC FORMAT"""
     pass
+# TODO: Convert PROC:
+# proc format;
 def analyze_segment(data, segment, var):
     """
     Converted from SAS macro
@@ -51,10 +49,12 @@ def analyze_segment(data, segment, var):
 # Calculate descriptive statistics
 data_stats = data.describe()
 print(data_stats)
+# TODO: Convert PROC:
+# proc means data=&data noprint;
 # Create new DataFrame _null_
 _null__df = pd.DataFrame()
-# TODO: Convert %IF:
-# %if &skip_analysis = 0 %then %do;
+# TODO: Convert DATA:
+# data _null_;
 # Detailed descriptive statistics
 data_stats = data.describe(percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
 print(data_stats)
@@ -69,6 +69,8 @@ for col in data.select_dtypes(include=['number']).columns:
 shapiro_df = pd.DataFrame(shapiro_results)
 print("Shapiro-Wilk test for normality:")
 print(shapiro_df)
+# TODO: Convert PROC:
+# proc univariate data=&data normal plot;
 # Perform t-test
 for col in data.select_dtypes(include=['number']).columns:
     if data[col].notna().sum() > 1:  # Need at least 2 values for test
@@ -77,41 +79,43 @@ for col in data.select_dtypes(include=['number']).columns:
         print(f"  T-statistic: {t_stat:.4f}")
         print(f"  P-value: {p_value:.4f}")
         print(f"  Significant at alpha=alpha;: {p_value < alpha;}")
+# TODO: Convert PROC:
+# proc ttest data=&data h0=0 alpha=&alpha;
 
+# TODO: Convert PROC_SQL:
+# proc sql noprint;
 def run_analysis():
     """
     Converted from SAS macro
     Original: %macro run_analysis;...
     """
     pass
-# TODO: Convert %LET:
-# %let i = 1;
-# TODO: Convert %LET:
-# %let segment = %scan(&segment_list, &i);
-# TODO: Convert %DO:
-# %do %while(&segment ne );
-%analyze_segment(
-data=WORK.analysis_data,
-segment=&segment,
-var=response_time
-);
-# TODO: Convert %LET:
-# %let i = %eval(&i + 1);
-# TODO: Convert %LET:
-# %let segment = %scan(&segment_list, &i);
-%end;
-%mend run_analysis;
+while segment ne:
+# TODO: Convert macro call: %analyze_segment(
+    # End of loop
 # Enable matplotlib for graphics
 plt.ion()
 # Set up HTML output
 output_path = Path("./output")
 output_file = output_path / 'analysis_report.html'
 output_path.mkdir(exist_ok=True, parents=True)
+# TODO: Convert ODS:
+# ods html path="./output"
+body="analysis_report.html"
+style=statistical;
 plt.suptitle('Statistical Analysis Report')
+# TODO: Convert TITLE:
+# title1 "Statistical Analysis Report";
 plt.title('By Segment')
+# TODO: Convert TITLE:
+# title2 "By Segment";
 # TODO: Convert PROC_R:
 # proc report data=WORK.analysis_data;
 # Close HTML output
 plt.close('all')
+# TODO: Convert ODS:
+# ods html close;
 # Disable matplotlib for graphics
 plt.ioff()
+# TODO: Convert ODS:
+# ods graphics off;

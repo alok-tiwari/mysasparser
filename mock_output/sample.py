@@ -37,55 +37,47 @@ except Exception as e:
     print(f'Error loading STAGE.sales_analysis: {e}')
     sales_analysis_df = pd.DataFrame()
 RAW_path = '/path/to/raw" access=readonly'
+# TODO: Convert LIBNAME:
+# libname RAW "/path/to/raw" access=readonly;
 STAGE_path = '/path/to/stage" compress=yes'
+# TODO: Convert LIBNAME:
+# libname STAGE "/path/to/stage" compress=yes;
 DW_path = 'oracle path="@production" schema=DW_SCHEMA'
-# TODO: Convert %LET:
-# %let reporting_date = %sysfunc(today());
-# TODO: Convert %LET:
-# %let lookback_period = 12;
+# TODO: Convert LIBNAME:
+# libname DW oracle path="@production" schema=DW_SCHEMA;
 def process_data(input_ds, output_ds, date_var, filter_condition):
     """
     Converted from SAS macro
     Original: %macro process_data(input_ds, output_ds, date_var=, filter_condition=);...
     """
     pass
-# TODO: Convert %LET:
-# %local error_count;
-%let error_count = 0;
-# TODO: Convert %IF:
-# %if %sysfunc(exist(&input_ds)) = 0 %then %do;
-# TODO: Convert %PUT:
-# %put ERROR: Input dataset &input_ds does not exist;
-# TODO: Convert %LET:
-# %let error_count = %eval(&error_count + 1);
-%end;
-# TODO: Convert %IF:
-# %if &error_count = 0 %then %do;
+    # End of loop
 
+# TODO: Convert PROC_SQL:
+# proc sql noprint;
 # TODO: Convert DATA step - no dataset name found:
 data &output_ds;
+# TODO: Convert DATA:
+# data &output_ds;
 # TODO: Convert FORMAT:
 # format metrics: 8.2 flags: $1.;
 # TODO: Convert INFORMAT:
 # informat _numeric_ best32.;
 run;
-# TODO: Convert %IF:
-# %if &syserr > 4 %then %do;
-# TODO: Convert %PUT:
-# %put ERROR: Data step failed with error code &syserr;
-# TODO: Convert %LET:
-# %let error_count = %eval(&error_count + 1);
-%end;
-%end;
- 
-&error_count
-%mend process_data;
+    # End of loop
+    # End of loop
 # Create new DataFrame STAGE.daily_summary
 daily_summary_df = pd.DataFrame()
+# TODO: Convert DATA:
+# data STAGE.daily_summary;
 
+# TODO: Convert PROC_SQL:
+# proc sql;
 # Calculate descriptive statistics
 sales_analysis_df_stats = sales_analysis_df.describe()
 print(sales_analysis_df_stats)
+# TODO: Convert PROC:
+# proc means data=STAGE.sales_analysis noprint;
 # Detailed descriptive statistics
 sales_analysis;_df_stats = sales_analysis;_df.describe(percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
 print(sales_analysis;_df_stats)
@@ -100,18 +92,11 @@ for col in sales_analysis;_df.select_dtypes(include=['number']).columns:
 shapiro_df = pd.DataFrame(shapiro_results)
 print("Shapiro-Wilk test for normality:")
 print(shapiro_df)
+# TODO: Convert PROC:
+# proc univariate data=STAGE.sales_analysis;
 # TODO: Implement PROC format
 def format_proc():
     """Python equivalent of PROC FORMAT"""
     pass
-# TODO: Convert %LET:
-# %let rc = %process_data(
-input_ds=STAGE.sales_analysis,
-output_ds=STAGE.final_output,
-date_var=transaction_date,
-filter_condition=%str(
-region in ('NORTH', 'SOUTH') and
-total_sales > 0 and
-moving_avg_90d is not missing
-)
-);
+# TODO: Convert PROC:
+# proc format;
