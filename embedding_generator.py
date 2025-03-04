@@ -591,3 +591,8 @@ class EmbeddingGenerator:
             logger.info(f"Exported {len(embeddings)} embeddings to {output_file}")
         except Exception as e:
             logger.error(f"Error exporting embeddings: {str(e)}")
+
+    def generate_embedding(self, component: SASComponent) -> CodeEmbedding:
+        """Generate embedding for a single component."""
+        embeddings = self.generate_embeddings([component])
+        return embeddings[0] if embeddings else None

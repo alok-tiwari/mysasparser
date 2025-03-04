@@ -622,3 +622,29 @@ class VectorStore:
         }
         
         return results
+    
+    def find_similar(self, embedding, collection: str, n_results: int = 5):
+        """Find similar components in a collection using embeddings."""
+        if collection not in self.collections:
+            return []
+        
+        # Convert numpy array to list if needed
+        if hasattr(embedding, 'tolist'):
+            embedding = embedding.tolist()
+        
+        # Query the collection
+        try:
+            results = self.collections[collection].query(
+                query_embeddings=[embedding],
+                n_results=n_results,
+                include=['metadatas', 'documents', 'distances']
+            )
+            
+            return {
+                'documents': results['documents'][0] if results['documents'] else [],
+                'metadatas': results['metadatas'][0] if results['metadatas'] else [],
+                'distances': results['distances'][0] if results['distances'] else []
+            }
+        except Exception as e:
+            logger.error(f"Error querying collection {collection}: {str(e)}")
+            return {'documents': [], 'metadatas': [], 'distances': []}

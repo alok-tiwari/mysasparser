@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Optional
 import re
 import logging
 from datetime import datetime
+from sas_parser import SASParser
 
 logger = logging.getLogger(__name__)
 
@@ -30,46 +31,58 @@ class SASPythonConverterTemplate:
         return None
 
     def convert_component(self, component: Dict[str, Any]) -> str:
-        """Convert a SAS component with enhanced error handling."""
+        """Convert a SAS component with enhanced validation and error handling."""
         try:
-            # Validate component structure
-            if not isinstance(component, dict):
-                raise SASConversionError("Invalid component format", component)
+            # Validate and clean component
+            cleaned_component = self.validate_and_clean_component(component)
             
-            required_fields = ['type', 'content']
-            missing_fields = [f for f in required_fields if f not in component]
-            if missing_fields:
-                raise SASConversionError(
-                    f"Missing required fields: {', '.join(missing_fields)}", 
-                    component
-                )
+            # Map component types to converter methods
+            type_mapping = {
+                '%LET': '_convert_let',
+                '%IF': '_convert_if',
+                '%PUT': '_convert_put',
+                '%DO': '_convert_if',  # Handle DO loops similarly for now
+                'DATA': '_convert_data',
+                'PROC': '_convert_proc',
+                'PROC_SQL': '_convert_proc_sql',
+                'LIBNAME': '_convert_libname',
+                'MACRO': '_convert_macro',
+                'ODS': '_convert_ods',
+                'FORMAT': '_convert_format',
+                'INFORMAT': '_convert_format',
+                'TITLE': '_convert_title',
+                'OPTIONS': '_convert_options',
+                'FILENAME': '_convert_filename',
+                'GOPTIONS': '_convert_options',
+                'FOOTNOTE': '_convert_title',
+                'AXIS': '_convert_title',
+                'LEGEND': '_convert_title',
+                'SYMBOL': '_convert_title',
+                'PATTERN': '_convert_title',
+            }
             
-            component_type = component.get('type', '').upper()
-            component_name = component.get('name', '').upper()
+            # Get appropriate converter method
+            component_type = cleaned_component['type']
+            method_name = type_mapping.get(component_type)
             
-            logger.debug(f"Converting {component_type} - {component_name}")
-            
-            # Get converter method
-            converter_method = getattr(self, f"_convert_{component_type.lower()}", None)
-            if not converter_method:
+            if not method_name:
                 raise SASConversionError(f"Unsupported component type: {component_type}", component)
             
-            # Convert component
-            result = converter_method(component)
+            converter_method = getattr(self, method_name, None)
+            if not converter_method:
+                raise SASConversionError(f"Converter method not found for type: {component_type}", component)
             
-            # Log success
-            if self.error_handler:
-                self.error_handler.add_note(
-                    component=f"{component_type} - {component_name}",
-                    message="Successfully converted"
-                )
+            # Convert component
+            result = converter_method(cleaned_component)
+            
+            if not result:
+                raise SASConversionError("Converter produced no output", component)
             
             return result
             
         except SASConversionError:
             raise
         except Exception as e:
-            logger.error(f"Unexpected error converting component: {str(e)}", exc_info=True)
             raise SASConversionError(
                 "Unexpected error during conversion",
                 component,
@@ -90,40 +103,29 @@ class SASPythonConverterTemplate:
             )
 
     def _convert_proc(self, component: Dict[str, Any]) -> str:
-        """Convert PROC statements using templates."""
-        proc_name = component.get('name', '').lower()
-        template_name = f"proc_{proc_name}"
-        
+        """Convert PROC statements with enhanced error handling."""
         try:
-            # Extract parameters based on PROC type
+            proc_type = component.get('name', '').lower()
+            
+            # Special handling for PROC SQL
+            if proc_type == 'sql':
+                return self._convert_proc_sql(component)
+            
+            template_name = f'proc_{proc_type}'
+            template = self.templates.get(template_name)
+            
+            if not template:
+                raise SASConversionError(f"No template found for PROC {proc_type}", component)
+            
             params = self._extract_proc_params(component)
-            return self.templates.get(template_name).render(**params)
-        except ValueError as e:
-            return f"# Template not found: {template_name}\n# {component.get('content', '')}"
+            if not params.get('dataset'):
+                raise SASConversionError(f"No dataset found for PROC {proc_type}", component)
+            
+            return template.render(**params)
+            
         except Exception as e:
-            return f"# Error converting PROC {proc_name}: {str(e)}\n# {component.get('content', '')}"
-
-    def _extract_proc_params(self, component: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract parameters for PROC templates."""
-        content = component.get('content', '')
-        proc_name = component.get('name', '').lower()
-        
-        # Common parameters
-        params = {
-            'dataset': self._extract_dataset(content),
-            'variables': self._extract_variables(content)
-        }
-        
-        # PROC-specific parameters
-        if proc_name == 'means':
-            params.update(self._extract_means_params(content))
-        elif proc_name == 'freq':
-            params.update(self._extract_freq_params(content))
-        elif proc_name == 'sort':
-            params.update(self._extract_sort_params(content))
-        # Add more PROC-specific parameter extraction
-        
-        return params
+            raise SASConversionError(f"Error converting PROC {component.get('name', '')}", 
+                                   component, {'error': str(e)})
 
     def _convert_data_step(self, component: Dict[str, Any]) -> str:
         """Convert DATA step using template."""
@@ -138,30 +140,169 @@ class SASPythonConverterTemplate:
         if self._is_complex_sql(content):
             return self.templates.get('complex_sql').render(**self._extract_complex_sql_params(content))
         
-        return self.templates.get('sql').render(**self._extract_sql_params(content))
+        return self.templates.get('sql').render(**self._extract_sql_params(component))
 
     def _convert_macro(self, component: Dict[str, Any]) -> str:
-        """Convert macro definitions using template."""
-        return self.templates.get('macro').render(**self._extract_macro_params(component))
+        """Convert MACRO definitions."""
+        try:
+            name = component.get('name', '')
+            content = component.get('content', '')
+            
+            # Extract macro parameters
+            param_match = re.search(r'%macro\s+\w+\((.*?)\)', content, re.IGNORECASE)
+            params = []
+            if param_match:
+                param_str = param_match.group(1)
+                params = [p.strip().split('=')[0] for p in param_str.split(',') if p.strip()]
+            
+            # Extract macro body
+            body_match = re.search(r'%macro.*?;(.*?)%mend', content, re.IGNORECASE | re.DOTALL)
+            body = body_match.group(1) if body_match else ''
+            
+            # Convert body to Python
+            python_body = self._convert_macro_body(body)
+            
+            return f"""
+def {name}({', '.join(params)}):
+    \"\"\"
+    Python function converted from SAS macro {name}
+    \"\"\"
+{python_body}
+"""
+        except Exception as e:
+            raise SASConversionError("Error converting MACRO", component, {'error': str(e)})
+
+    def _convert_macro_body(self, body: str) -> str:
+        """Convert macro body to Python code."""
+        # Basic conversion of common SAS macro statements
+        python_body = []
+        for line in body.split('\n'):
+            line = line.strip()
+            if line.startswith('%let'):
+                # Convert %let to Python assignment
+                match = re.search(r'%let\s+(\w+)\s*=\s*(.+?);', line)
+                if match:
+                    var, value = match.groups()
+                    python_body.append(f"    {var} = {value}")
+            elif line.startswith('%if'):
+                # Convert %if to Python if
+                match = re.search(r'%if\s+(.+?)\s+%then', line)
+                if match:
+                    condition = match.group(1)
+                    python_body.append(f"    if {condition}:")
+            else:
+                # Add other lines as comments for now
+                if line:
+                    python_body.append(f"    # {line}")
+        
+        return '\n'.join(python_body)
 
     def _convert_macro_variable(self, component: Dict[str, Any]) -> str:
         """Convert macro variable operations using template."""
         return self.templates.get('macro_variable').render(**self._extract_macro_var_params(component))
 
     def _convert_libname(self, component: Dict[str, Any]) -> str:
-        """Convert LIBNAME statements using template."""
-        return self.templates.get('libname').render(**self._extract_libname_params(component))
+        """Convert LIBNAME statements."""
+        try:
+            name = component.get('name', '')
+            content = component.get('content', '')
+            
+            # Handle different LIBNAME formats
+            if 'oracle' in content.lower():
+                path_match = re.search(r'path\s*=\s*["\']([^"\']+)["\']', content)
+                path = path_match.group(1) if path_match else ''
+                return f"""
+# Oracle connection for {name}
+import cx_Oracle
+{name}_conn = cx_Oracle.connect('{path}')
+"""
+            else:
+                path_match = re.search(r'libname\s+\w+\s+["\']([^"\']+)["\']', content)
+                path = path_match.group(1) if path_match else ''
+                return f"""
+# Set up directory for {name}
+import os
+{name}_path = "{path}"
+os.makedirs({name}_path, exist_ok=True)
+"""
+        except Exception as e:
+            raise SASConversionError("Error converting LIBNAME", component, {'error': str(e)})
 
     def _convert_filename(self, component: Dict[str, Any]) -> str:
-        """Convert FILENAME statements using template."""
-        return self.templates.get('filename').render(**self._extract_filename_params(component))
+        """Convert FILENAME statements."""
+        try:
+            name = component.get('name', '')
+            content = component.get('content', '')
+            
+            # Extract path
+            path_match = re.search(r'filename\s+\w+\s+["\']([^"\']+)["\']', content, re.IGNORECASE)
+            path = path_match.group(1) if path_match else ''
+            
+            # Handle different file types
+            if '.csv' in path.lower():
+                return f"""
+# CSV file reference for {name}
+{name}_path = "{path}"
+{name}_df = pd.read_csv({name}_path)
+"""
+            elif '.xlsx' in path.lower():
+                return f"""
+# Excel file reference for {name}
+{name}_path = "{path}"
+{name}_df = pd.read_excel({name}_path)
+"""
+            else:
+                return f"""
+# File reference for {name}
+{name}_path = "{path}"
+with open({name}_path, 'r') as {name}_file:
+    {name}_content = {name}_file.read()
+"""
+        except Exception as e:
+            raise SASConversionError("Error converting FILENAME", component, {'error': str(e)})
+
+    def _extract_filename_params(self, component: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract parameters for FILENAME statements."""
+        try:
+            content = component.get('content', '')
+            name = component.get('name', '')
+            
+            # Extract path and options
+            path_match = re.search(r'filename\s+\w+\s+["\']([^"\']+)["\']', content, re.IGNORECASE)
+            options_match = re.search(r'\s+(\w+\s*=\s*[^;]+);', content, re.IGNORECASE)
+            
+            return {
+                'fileref': name,
+                'path': path_match.group(1) if path_match else '',
+                'options': options_match.group(1) if options_match else ''
+            }
+        except Exception as e:
+            raise SASConversionError("Error extracting FILENAME parameters", 
+                                   component, {'error': str(e)})
 
     def _convert_ods(self, component: Dict[str, Any]) -> str:
-        """Convert ODS statements using template."""
-        content = component.get('content', '').lower()
-        if 'graphics' in content:
-            return self.templates.get('ods_graphics').render(**self._extract_ods_graphics_params(content))
-        return self.templates.get('ods').render(**self._extract_ods_params(content))
+        """Convert ODS statements."""
+        try:
+            content = component.get('content', '')
+            
+            if 'html' in content.lower():
+                return """
+# HTML output configuration
+from IPython.display import HTML
+"""
+            elif 'pdf' in content.lower():
+                return """
+# PDF output configuration
+import matplotlib.pyplot as plt
+plt.rcParams['pdf.fonttype'] = 42
+"""
+            elif 'rtf' in content.lower():
+                return "# RTF output not directly supported in Python"
+            else:
+                return "# ODS output configuration"
+            
+        except Exception as e:
+            raise SASConversionError("Error converting ODS", component, {'error': str(e)})
 
     # Helper methods for parameter extraction
     def _extract_dataset(self, content: str) -> str:
@@ -325,25 +466,44 @@ class SASPythonConverterTemplate:
                 rename_dict[old.strip()] = new.strip()
         return rename_dict
 
-    def _extract_sql_params(self, content: str) -> Dict[str, Any]:
-        """Extract parameters from SQL statement."""
-        return {
-            'statements': self._parse_sql_statements(content)
-        }
+    def _extract_sql_params(self, component: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract SQL parameters."""
+        try:
+            content = component.get('content', '')
+            # Extract the SQL query
+            query_match = re.search(r'proc\s+sql.*?;(.*?)(?:quit|run);', 
+                                  content, 
+                                  re.IGNORECASE | re.DOTALL)
+            
+            if not query_match:
+                raise ValueError("Could not find SQL query")
+            
+            query = query_match.group(1).strip()
+            
+            # Convert SAS SQL to pandas
+            query = self._convert_sas_sql_to_pandas(query)
+            
+            return {
+                'query': query,
+                'output_table': self._extract_output_table(content)
+            }
+        except Exception as e:
+            raise SASConversionError("Failed to extract SQL parameters", 
+                                   component, {'error': str(e)})
 
-    def _parse_sql_statements(self, content: str) -> List[Dict[str, Any]]:
-        """Parse SQL statements into structured format."""
-        statements = []
-        # Split into individual SQL statements
-        sql_stmts = re.split(r';(?=[^;]*$)', content)
+    def _convert_sas_sql_to_pandas(self, sas_sql: str) -> str:
+        """Convert SAS SQL syntax to pandas operations."""
+        # Remove SAS-specific keywords
+        sql = re.sub(r'(?i)\bproc\s+sql\b', '', sas_sql)
+        sql = re.sub(r'(?i)\bquit\b|\brun\b', '', sql)
         
-        for stmt in sql_stmts:
-            if re.search(r'^\s*select', stmt, re.IGNORECASE):
-                statements.append(self._parse_select_statement(stmt))
-            elif re.search(r'^\s*create\s+table', stmt, re.IGNORECASE):
-                statements.append(self._parse_create_table(stmt))
+        # Convert CREATE TABLE to DataFrame assignment
+        sql = re.sub(r'(?i)create\s+table\s+(\w+)\s+as', r'\1_df =', sql)
         
-        return statements
+        # Convert SAS dataset references
+        sql = re.sub(r'(?i)from\s+(\w+)', r'from \1_df', sql)
+        
+        return sql
 
     def _convert_sas_condition(self, condition: str) -> str:
         """Convert SAS condition to Python condition."""
@@ -960,3 +1120,236 @@ class SASPythonConverterTemplate:
                 unique_embeddings.append(emb)
         
         return unique_embeddings 
+
+    def _extract_component_info(self, component: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract and validate component information."""
+        try:
+            return {
+                'type': component.get('type', '').lower(),
+                'name': component.get('name', ''),
+                'content': component.get('content', '').strip(),
+                'lines': component.get('lines', []),
+                'metadata': {
+                    'source_file': component.get('source_file', ''),
+                    'parent_component': component.get('parent_component', None)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error extracting component info: {str(e)}")
+            raise SASConversionError("Failed to extract component info", component)
+
+    def validate_and_clean_component(self, component: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and clean component data."""
+        required_fields = ['type', 'content']
+        
+        # Check required fields
+        missing_fields = [f for f in required_fields if not component.get(f)]
+        if missing_fields:
+            raise SASConversionError(
+                f"Missing required fields: {', '.join(missing_fields)}", 
+                component
+            )
+        
+        # Clean and normalize component data
+        cleaned = {
+            'type': str(component['type']).strip().upper(),
+            'name': str(component.get('name', '')).strip(),
+            'content': str(component['content']).strip(),
+            'metadata': component.get('metadata', {}),
+        }
+        
+        # Validate content is not empty
+        if not cleaned['content']:
+            raise SASConversionError("Empty component content", component)
+        
+        return cleaned 
+
+    def convert_file(self, input_file: str, output_file: str) -> None:
+        """Convert a SAS file to Python."""
+        try:
+            # Parse the SAS file
+            parser = SASParser()
+            components = parser.parse_file(input_file)
+            
+            # Convert each component
+            python_code = []
+            python_code.append("import pandas as pd\nimport numpy as np\n")
+            
+            for component in components:
+                try:
+                    converted = self.convert_component({
+                        'type': component.type,
+                        'name': component.name,
+                        'content': component.content,
+                        'metadata': {
+                            'source_file': input_file,
+                            'line_number': component.line_start
+                        }
+                    })
+                    if converted:
+                        python_code.append(converted)
+                except Exception as e:
+                    logger.warning(f"Failed to convert component {component.type} - {component.name}: {str(e)}")
+                    python_code.append(f"# Failed to convert: {component.content}")
+            
+            # Write the converted code to file
+            with open(output_file, 'w') as f:
+                f.write('\n\n'.join(python_code))
+            
+        except Exception as e:
+            logger.error(f"Error converting file {input_file}: {str(e)}")
+            raise 
+
+    def _convert_let(self, component: Dict[str, Any]) -> str:
+        """Convert %LET statements."""
+        try:
+            name = component.get('name', '')
+            content = component.get('content', '')
+            value_match = re.search(r'%let\s+\w+\s*=\s*(.+?);', content, re.IGNORECASE)
+            value = value_match.group(1) if value_match else ''
+            
+            return f"{name} = {value}"
+        except Exception as e:
+            raise SASConversionError("Error converting %LET", component, {'error': str(e)})
+
+    def _convert_data(self, component: Dict[str, Any]) -> str:
+        """Convert DATA step."""
+        try:
+            params = {
+                'output_dataset': component.get('name', 'output'),
+                'content': component.get('content', '')
+            }
+            return self.templates.get('data_step').render(**params)
+        except Exception as e:
+            raise SASConversionError("Error converting DATA step", component, {'error': str(e)})
+
+    def _convert_if(self, component: Dict[str, Any]) -> str:
+        """Convert %IF statements."""
+        try:
+            content = component.get('content', '')
+            condition_match = re.search(r'%if\s+(.*?)\s+%then', content, re.IGNORECASE)
+            condition = condition_match.group(1) if condition_match else ''
+            
+            return f"if {condition}:"
+        except Exception as e:
+            raise SASConversionError("Error converting %IF", component, {'error': str(e)})
+
+    def _convert_put(self, component: Dict[str, Any]) -> str:
+        """Convert %PUT statements."""
+        try:
+            content = component.get('content', '')
+            message_match = re.search(r'%put\s+(.*?);', content, re.IGNORECASE)
+            message = message_match.group(1) if message_match else ''
+            
+            return f"print({message})"
+        except Exception as e:
+            raise SASConversionError("Error converting %PUT", component, {'error': str(e)})
+
+    def _convert_format(self, component: Dict[str, Any]) -> str:
+        """Convert FORMAT statements."""
+        try:
+            content = component.get('content', '')
+            format_match = re.search(r'format\s+(.*?);', content, re.IGNORECASE)
+            format_spec = format_match.group(1) if format_match else ''
+            
+            return f"# Format specification: {format_spec}\n# TODO: Implement format conversion"
+        except Exception as e:
+            raise SASConversionError("Error converting FORMAT", component, {'error': str(e)})
+
+    def _convert_title(self, component: Dict[str, Any]) -> str:
+        """Convert TITLE statements."""
+        try:
+            content = component.get('content', '')
+            title_match = re.search(r'title\s*\d*\s*["\']?(.*?)["\']?;', content, re.IGNORECASE)
+            title = title_match.group(1) if title_match else ''
+            
+            return f"plt.title('{title}')"
+        except Exception as e:
+            raise SASConversionError("Error converting TITLE", component, {'error': str(e)})
+
+    def _convert_options(self, component: Dict[str, Any]) -> str:
+        """Convert OPTIONS statements."""
+        try:
+            content = component.get('content', '')
+            return f"# SAS Options: {content}\n# TODO: Implement options conversion"
+        except Exception as e:
+            raise SASConversionError("Error converting OPTIONS", component, {'error': str(e)})
+
+    def _extract_output_table(self, content: str) -> Optional[str]:
+        """Extract output table name from SQL statement."""
+        match = re.search(r'create\s+table\s+(\w+)', content, re.IGNORECASE)
+        return match.group(1) if match else None 
+
+    def _extract_proc_params(self, component: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract parameters for PROC templates."""
+        try:
+            content = component.get('content', '')
+            proc_name = component.get('name', '').lower()
+            
+            # Extract dataset name
+            dataset_match = re.search(r'data\s*=\s*(\w+\.?\w*)', content, re.IGNORECASE)
+            dataset = dataset_match.group(1) if dataset_match else None
+            
+            # Extract variables
+            var_match = re.search(r'var\s+(.*?);', content, re.IGNORECASE)
+            variables = var_match.group(1).split() if var_match else []
+            
+            # Common parameters
+            params = {
+                'dataset': dataset,
+                'variables': variables
+            }
+            
+            # Add specific parameters based on PROC type
+            if proc_name == 'means':
+                maxdec_match = re.search(r'maxdec\s*=\s*(\d+)', content, re.IGNORECASE)
+                params['maxdec'] = int(maxdec_match.group(1)) if maxdec_match else None
+                
+                # Extract BY variables
+                by_match = re.search(r'by\s+(.*?);', content, re.IGNORECASE)
+                params['by_vars'] = by_match.group(1).split() if by_match else []
+                
+            elif proc_name == 'freq':
+                tables_match = re.search(r'tables\s+(.*?);', content, re.IGNORECASE)
+                if tables_match:
+                    tables = []
+                    for table_spec in tables_match.group(1).split():
+                        if '*' in table_spec:
+                            rows, cols = table_spec.split('*')
+                            tables.append({'rows': rows, 'cols': cols})
+                        else:
+                            tables.append({'rows': table_spec})
+                    params['tables'] = tables
+                    params['chisq'] = 'chisq' in content.lower()
+                    
+            elif proc_name == 'sql':
+                # Extract SQL query
+                query_match = re.search(r'proc\s+sql.*?;(.*?)(?:quit|run);', 
+                                      content, re.IGNORECASE | re.DOTALL)
+                params['query'] = query_match.group(1).strip() if query_match else content
+                
+            elif proc_name == 'univariate':
+                # Add univariate-specific parameters
+                params['plots'] = 'plot' in content.lower()
+                params['normal'] = 'normal' in content.lower()
+                
+            elif proc_name == 'format':
+                # Extract format definitions
+                format_match = re.search(r'value\s+(\w+)(.*?);', content, re.IGNORECASE | re.DOTALL)
+                if format_match:
+                    params['format_name'] = format_match.group(1)
+                    params['format_spec'] = format_match.group(2)
+            
+            return params
+            
+        except Exception as e:
+            raise SASConversionError(f"Error extracting parameters for PROC {proc_name}", 
+                                   component, {'error': str(e)})
+
+    def _convert_proc_sql(self, component: Dict[str, Any]) -> str:
+        """Convert PROC SQL statements."""
+        try:
+            params = self._extract_sql_params(component)
+            return self.templates.get('proc_sql').render(**params)
+        except Exception as e:
+            raise SASConversionError("Error converting PROC SQL", component, {'error': str(e)}) 

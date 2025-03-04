@@ -15,12 +15,11 @@ imports:
 
 proc_means:
   template: |
-    {% if dataset %}
-    # Calculate descriptive statistics for {{ dataset }}
+    # Calculate descriptive statistics for ${dataset}
     {% if variables %}
-    stats_df = {{ dataset }}_df[{{ variables|join(', ') }}].describe()
+    stats_df = ${dataset}_df[${variables}].describe()
     {% else %}
-    stats_df = {{ dataset }}_df.describe()
+    stats_df = ${dataset}_df.describe()
     {% endif %}
     
     {% if maxdec %}
@@ -29,490 +28,107 @@ proc_means:
     
     print('\nDescriptive Statistics:')
     print(stats_df)
-    {% endif %}
 
 proc_freq:
   template: |
-    # Enhanced frequency analysis
-    from scipy import stats
-    import numpy as np
-    
-    {% for table in tables %}
-    {% if '*' in table %}
-    {% set vars = table.split('*') %}
-    # Cross-tabulation of {{vars|join(' by ')}}
-    ctab = pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'])
-    
-    print('\nCross-tabulation:')
-    print(ctab)
-    
-    # Add row and column percentages
-    print('\nRow Percentages:')
-    print(pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'], normalize='index') * 100)
-    print('\nColumn Percentages:')
-    print(pd.crosstab({{dataset}}_df['{{vars[0]}}'], {{dataset}}_df['{{vars[1]}}'], normalize='columns') * 100)
-    
-    {% if chisq %}
-    # Chi-square test
-    chi2, p_value, dof, expected = stats.chi2_contingency(ctab)
-    print('\nChi-square test results:')
-    print("Chi2 statistic: {:.4f}".format(chi2))
-    print("p-value: {:.4f}".format(p_value))
-    print('Degrees of freedom: {}'\.format(dof))
-    print('Significant at α=0.05: {}'\.format(p_value < 0.05))
-    
-    # Fisher's exact test (for 2x2 tables)
-    if ctab.shape == (2, 2):
-        fisher_stat, fisher_p = stats.fisher_exact(ctab)
-        print('\nFisher\'s Exact Test:')
-        print('Odds ratio: {:.4f}'.format(fisher_stat))
-        print('p-value: {:.4f}'.format(fisher_p))
-    
-    # Measures of association
-    n = ctab.sum().sum()
-    cramers_v = np.sqrt(chi2 / (n * min(ctab.shape[0]-1, ctab.shape[1]-1)))
-    print('\nMeasures of Association:')
-    print('Cramer\'s V: {:.4f}'.format(cramers_v))
+    # Frequency analysis for ${dataset}
+    {% if tables %}
+    for table in ${tables}:
+        # Create frequency table
+        freq_table = pd.crosstab(
+            ${dataset}_df[table['rows']],
+            ${dataset}_df[table['cols']] if 'cols' in table else None,
+            margins=True
+        )
+        
+        print('\nFrequency Table:')
+        print(freq_table)
+        
+        {% if chisq %}
+        # Chi-square test if requested
+        from scipy.stats import chi2_contingency
+        chi2, p_value, dof, expected = chi2_contingency(freq_table)
+        print("\nChi-square test results:")
+        print(f"Chi2 statistic: {chi2:.4f}")
+        print(f"p-value: {p_value:.4f}")
+        {% endif %}
     {% endif %}
-    
-    {% if cmh and strata_var %}
-    # Cochran-Mantel-Haenszel test
-    from statsmodels.stats.contingency_tables import StratifiedTable
-    strata = {{dataset}}_df['{{strata_var}}'].unique()
-    tables = [pd.crosstab(
-        {{dataset}}_df[{{dataset}}_df['{{strata_var}}'] == s]['{{vars[0]}}'],
-        {{dataset}}_df[{{dataset}}_df['{{strata_var}}'] == s]['{{vars[1]}}']
-    ) for s in strata]
-    
-    cmh_result = StratifiedTable(tables).test_null_odds()
-    print('\nCochran-Mantel-Haenszel Test:')
-    print('Statistic: {:.4f}'.format(cmh_result.statistic))
-    print('p-value: {:.4f}'.format(cmh_result.pvalue))
-    {% endif %}
-    
-    {% else %}
-    # Single variable frequency distribution
-    freq = {{dataset}}_df['{{table}}'].value_counts()
-    pct = {{dataset}}_df['{{table}}'].value_counts(normalize=True) * 100
-    freq_df = pd.DataFrame({
-        'Frequency': freq,
-        'Percentage': pct,
-        'Cumulative Freq': freq.cumsum(),
-        'Cumulative Pct': pct.cumsum()
-    })
-    print('\nFrequency Distribution for {{table}}:')
-    print(freq_df)
-    {% endif %}
-    {% endfor %}
-
-proc_freq_extensions:
-  template: |
-    # Additional statistical measures for PROC FREQ
-    def calculate_risk_ratios(table):
-        """Calculate risk ratios and odds ratios."""
-        if table.shape != (2, 2):
-            return None
-            
-        a = table.iloc[0,0]  # exposed, outcome
-        b = table.iloc[0,1]  # exposed, no outcome
-        c = table.iloc[1,0]  # unexposed, outcome
-        d = table.iloc[1,1]  # unexposed, no outcome
-        
-        # Risk ratio
-        risk_exposed = a / (a + b)
-        risk_unexposed = c / (c + d)
-        risk_ratio = risk_exposed / risk_unexposed
-        
-        # Odds ratio
-        odds_ratio = (a * d) / (b * c)
-        
-        return {
-            'risk_ratio': risk_ratio,
-            'odds_ratio': odds_ratio,
-            'risk_exposed': risk_exposed,
-            'risk_unexposed': risk_unexposed
-        }
-
-    def calculate_trend_test(table):
-        """Cochran-Armitage trend test."""
-        from scipy.stats import norm
-        
-        scores = np.arange(table.shape[1])
-        n_i = table.sum(axis=1)
-        p_i = np.sum(scores * table.T / n_i, axis=1)
-        p_0 = np.sum(scores * table.sum(axis=0)) / np.sum(n_i)
-        
-        # Calculate test statistic
-        numerator = np.sum(n_i * (p_i - p_0))
-        denominator = np.sqrt(np.sum(n_i * (p_i - p_0)**2))
-        z_stat = numerator / denominator
-        p_value = 2 * (1 - norm.cdf(abs(z_stat)))
-        
-        return z_stat, p_value
 
 proc_sort:
   template: |
-    {% if dataset %}
-    # Sort {{ dataset }}
+    # Sort ${dataset}
     {% if by_vars %}
-    {{ dataset }}_df = {{ dataset }}_df.sort_values(
-        by=[{{ by_vars|join(', ') }}],
-        {% if ascending is defined %}ascending={{ ascending }}{% endif %}
+    ${dataset}_df = ${dataset}_df.sort_values(
+        by=${by_vars},
+        {% if ascending %}ascending=${ascending}{% endif %}
     )
     
     {% if nodupkey %}
-    {{ dataset }}_df = {{ dataset }}_df.drop_duplicates(subset=[{{ by_vars|join(', ') }}])
+    ${dataset}_df = ${dataset}_df.drop_duplicates(subset=${by_vars})
     {% endif %}
     
     {% if nodup %}
-    {{ dataset }}_df = {{ dataset }}_df.drop_duplicates()
-    {% endif %}
-    {% endif %}
-    {% endif %}
-
-proc_univariate:
-  template: |
-    {% if dataset and variables %}
-    # Univariate analysis for {{ dataset }}
-    from scipy import stats
-    
-    {% for var in variables %}
-    print("\nUnivariate analysis for {{ var }}:")
-    data = {{ dataset }}_df['{{ var }}'].dropna()
-    
-    # Basic statistics
-    desc = data.describe()
-    print("\nDescriptive statistics:")
-    print(desc)
-    
-    # Additional statistics
-    print("\nAdditional statistics:")
-    print("Skewness: {:.4f}".format(stats.skew(data)))
-    print("Kurtosis: {:.4f}".format(stats.kurtosis(data)))
-    
-    {% if plots %}
-    # Plots
-    import matplotlib.pyplot as plt
-    
-    plt.figure(figsize=(12, 4))
-    
-    # Histogram
-    plt.subplot(131)
-    data.hist(bins=30)
-    plt.title('Histogram')
-    
-    # Box plot
-    plt.subplot(132)
-    plt.boxplot(data)
-    plt.title('Box Plot')
-    
-    # Q-Q plot
-    plt.subplot(133)
-    stats.probplot(data, dist="norm", plot=plt)
-    plt.title('Q-Q Plot')
-    
-    plt.tight_layout()
-    plt.show()
-    {% endif %}
-    {% endfor %}
-    {% endif %}
-
-proc_ttest:
-  template: |
-    # Enhanced t-test analysis
-    from scipy import stats
-    import numpy as np
-    
-    {% if one_sample %}
-    # One-sample t-test
-    data = {{dataset}}_df['{{var}}'].dropna()
-    mean = np.mean(data)
-    std = np.std(data, ddof=1)
-    n = len(data)
-    std_err = std / np.sqrt(n)
-    
-    # Calculate t-statistic and p-value
-    t_stat, p_value = stats.ttest_1samp(data, {{mu0}})
-    
-    # Calculate confidence interval
-    t_crit = stats.t.ppf(0.975, df=n-1)  # 95% CI
-    ci_lower = mean - t_crit * std_err
-    ci_upper = mean + t_crit * std_err
-    
-    print('\nOne-Sample T-Test Results:')
-    print('Variable: {{var}}')
-    print('N: {}'\.format(n))
-    print('Mean: {:.4f}'.format(mean))
-    print('Std Dev: {:.4f}'.format(std))
-    print('Std Err: {:.4f}'.format(std_err))
-    print('t-statistic: {:.4f}'.format(t_stat))
-    print('p-value: {:.4f}'.format(p_value))
-    print('95% CI: ({:.4f}, {:.4f})'.format(ci_lower, ci_upper))
-    
-    {% elif paired %}
-    # Paired t-test
-    var1_data = {{dataset}}_df['{{var1}}'].dropna()
-    var2_data = {{dataset}}_df['{{var2}}'].dropna()
-    
-    # Calculate paired differences
-    diff = var1_data - var2_data
-    mean_diff = np.mean(diff)
-    std_diff = np.std(diff, ddof=1)
-    n = len(diff)
-    std_err = std_diff / np.sqrt(n)
-    
-    t_stat, p_value = stats.ttest_rel(var1_data, var2_data)
-    
-    # Calculate confidence interval for difference
-    t_crit = stats.t.ppf(0.975, df=n-1)
-    ci_lower = mean_diff - t_crit * std_err
-    ci_upper = mean_diff + t_crit * std_err
-    
-    print('\nPaired T-Test Results:')
-    print('Variables: {{var1}} - {{var2}}')
-    print('N: {}'\.format(n))
-    print('Mean Difference: {:.4f}'.format(mean_diff))
-    print('Std Dev: {:.4f}'.format(std_diff))
-    print('Std Err: {:.4f}'.format(std_err))
-    print('t-statistic: {:.4f}'.format(t_stat))
-    print('p-value: {:.4f}'.format(p_value))
-    print('95% CI: ({:.4f}, {:.4f})'.format(ci_lower, ci_upper))
-    
-    {% else %}
-    # Independent t-test
-    group1 = {{dataset}}_df[{{dataset}}_df['{{group_var}}'] == {{group1_value}}]['{{var}}'].dropna()
-    group2 = {{dataset}}_df[{{dataset}}_df['{{group_var}}'] == {{group2_value}}]['{{var}}'].dropna()
-    
-    # Calculate statistics
-    mean1 = np.mean(group1)
-    mean2 = np.mean(group2)
-    std1 = np.std(group1, ddof=1)
-    std2 = np.std(group2, ddof=1)
-    n1 = len(group1)
-    n2 = len(group2)
-    
-    # Perform t-test
-    equal_var = {{equal_var|default(True)}}
-    t_stat, p_value = stats.ttest_ind(group1, group2, equal_var=equal_var)
-    
-    # Calculate confidence interval
-    if equal_var:
-        # Pooled standard error
-        df = n1 + n2 - 2
-        pooled_var = ((n1-1) * std1**2 + (n2-1) * std2**2) / df
-        std_err = np.sqrt(pooled_var * (1/n1 + 1/n2))
-    else:
-        # Welch-Satterthwaite
-        std_err = np.sqrt(std1**2/n1 + std2**2/n2)
-        df = (std1**2/n1 + std2**2/n2)**2 / ((std1**2/n1)**2/(n1-1) + (std2**2/n2)**2/(n2-1))
-    
-    t_crit = stats.t.ppf(0.975, df=df)
-    ci_lower = (mean1 - mean2) - t_crit * std_err
-    ci_upper = (mean1 - mean2) + t_crit * std_err
-    
-    print('\nIndependent T-Test Results:')
-    print('Variable: {{var}}')
-    print('Group 1: , N='.format({{group1_value}}, n1))
-    print('Group 2: , N='.format({{group2_value}}, n2))
-    print('Mean 1: {:.4f}'.format(mean1))
-    print('Mean 2: {:.4f}'.format(mean2))
-    print('Std Dev 1: {:.4f}'.format(std1))
-    print('Std Dev 2: {:.4f}'.format(std2))
-    print('t-statistic: {:.4f}'.format(t_stat))
-    print('p-value: {:.4f}'.format(p_value))
-    print('95% CI: ({:.4f}, {:.4f})'.format(ci_lower, ci_upper))
-    {% endif %}
-
-proc_reg:
-  template: |
-    {% if dataset and dependent and independent %}
-    # Linear regression analysis
-    from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import r2_score, mean_squared_error
-    import numpy as np
-    
-    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
-    y = {{ dataset }}_df['{{ dependent }}']
-    
-    model = LinearRegression()
-    model.fit(X, y)
-    
-    # Print results
-    print("\nRegression Results:")
-    print("\nCoefficients:")
-    for var, coef in zip([{{ independent|join(', ') }}], model.coef_):
-        print(": {:.4f}".format(var, coef))
-    print("\nIntercept: {:.4f}".format(model.intercept_))
-    print("R-squared: {:.4f}".format(model.score(X, y)))
-    
-    # Predictions and residuals
-    y_pred = model.predict(X)
-    residuals = y - y_pred
-    
-    {% if plots %}
-    import matplotlib.pyplot as plt
-    
-    plt.figure(figsize=(12, 4))
-    
-    # Actual vs Predicted
-    plt.subplot(121)
-    plt.scatter(y, y_pred)
-    plt.plot([y.min(), y.max()], [y.min(), y.max()], 'r--')
-    plt.xlabel('Actual')
-    plt.ylabel('Predicted')
-    plt.title('Actual vs Predicted')
-    
-    # Residual plot
-    plt.subplot(122)
-    plt.scatter(y_pred, residuals)
-    plt.axhline(y=0, color='r', linestyle='--')
-    plt.xlabel('Predicted')
-    plt.ylabel('Residuals')
-    plt.title('Residual Plot')
-    
-    plt.tight_layout()
-    plt.show()
-    {% endif %}
-    {% endif %}
-
-proc_corr:
-  template: |
-    {% if dataset and variables %}
-    # Correlation analysis for {{ dataset }}
-    corr_df = {{ dataset }}_df[[{{ variables|join(', ') }}]].corr()
-    
-    print("\nCorrelation Matrix:")
-    print(corr_df)
-    
-    {% if plots %}
-    import seaborn as sns
-    import matplotlib.pyplot as plt
-    
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(corr_df, annot=True, cmap='coolwarm', center=0)
-    plt.title('Correlation Heatmap')
-    plt.show()
+    ${dataset}_df = ${dataset}_df.drop_duplicates()
     {% endif %}
     {% endif %}
 
 data_step:
   template: |
-    {% if output_dataset %}
-    # Create new dataset {{ output_dataset }}
+    # Create new dataset ${output_dataset}
     {% if input_dataset %}
-    {{ output_dataset }}_df = {{ input_dataset }}_df.copy()
+    ${output_dataset}_df = ${input_dataset}_df.copy()
     {% else %}
-    {{ output_dataset }}_df = pd.DataFrame()
+    ${output_dataset}_df = pd.DataFrame()
     {% endif %}
     
     {% if where_clause %}
-    {{ output_dataset }}_df = {{ output_dataset }}_df[{{ where_clause }}]
+    ${output_dataset}_df = ${output_dataset}_df[${where_clause}]
     {% endif %}
     
-    {% if assignments %}
-    {% for assignment in assignments %}
-    {{ output_dataset }}_df['{{ assignment.variable }}'] = {{ assignment.expression }}
-    {% endfor %}
+    {% if drop_vars %}
+    ${output_dataset}_df = ${output_dataset}_df.drop(columns=${drop_vars})
     {% endif %}
+    
+    {% if keep_vars %}
+    ${output_dataset}_df = ${output_dataset}_df[${keep_vars}]
     {% endif %}
-
-  by_group_processing:
-    template: |
-      class ByGroupProcessor:
-          def __init__(self, df, by_vars):
-              self.df = df
-              self.by_vars = by_vars
-              self.grouped = df.groupby(by_vars)
-              self._first = self._create_first_last_flags('first')
-              self._last = self._create_first_last_flags('last')
-          
-          def _create_first_last_flags(self, flag_type):
-              """Create FIRST. and LAST. flags for BY groups."""
-              if flag_type == 'first':
-                  return self.grouped.cumcount() == 0
-              else:
-                  return self.grouped.cumcount() == (self.grouped.size() - 1)
-          
-          def process(self, func):
-              """Process data by group."""
-              return self.grouped.apply(func)
-          
-          @property
-          def first(self):
-              """Get FIRST. flag for current observation."""
-              return self._first
-          
-          @property
-          def last(self):
-              """Get LAST. flag for current observation."""
-              return self._last
-
-  infile:
-    template: |
-      class InfileReader:
-          def __init__(self, file_path, **options):
-              self.file_path = file_path
-              self.options = options
-              
-          def read(self):
-              """Read external file based on options."""
-              if self.options.get('delimiter') == ' ':
-                  # Fixed-width file
-                  return pd.read_fwf(
-                      self.file_path,
-                      widths=self.options.get('widths'),
-                      names=self.options.get('names')
-                  )
-              else:
-                  # Delimited file
-                  return pd.read_csv(
-                      self.file_path,
-                      sep=self.options.get('delimiter', ','),
-                      names=self.options.get('names'),
-                      skiprows=self.options.get('skiprows', 0)
-                  )
+    
+    {% if rename_dict %}
+    ${output_dataset}_df = ${output_dataset}_df.rename(columns=${rename_dict})
+    {% endif %}
 
 proc_sql:
   template: |
-    {% if statements %}
+    # SQL operations
     {% for stmt in statements %}
     {% if stmt.type == 'select' %}
-    result_df = {{ stmt.from_table }}_df.copy()
-    
-    {% if stmt.where %}
-    result_df = result_df[{{ stmt.where }}]
+    result = ${stmt.table_df}
+    {% if stmt.where_clause %}
+    result = result[${stmt.where_clause}]
     {% endif %}
-    
-    {% if stmt.columns %}
-    result_df = result_df[{{ stmt.columns|join(', ') }}]
-    {% endif %}
-    
     {% if stmt.order_by %}
-    result_df = result_df.sort_values(
-        by={{ stmt.order_by.columns|join(', ') }},
-        ascending={{ stmt.order_by.ascending|default(True) }}
-    )
+    result = result.sort_values(by=${stmt.order_by})
     {% endif %}
     {% endif %}
     {% endfor %}
-    {% endif %}
+
 libname:
   template: |
-    # Library definition for {{ libname }}
-    {{ libname }}_path = "{{ path }}"
+    # Library definition for ${libname}
+    ${libname}_path = "${path}"
     {% if options %}
-    # Options: {{ options|join(', ') }}
+    # Options: ${options|join(', ')}
     {% endif %}
     
-    if not os.path.exists({{ libname }}_path):
-        os.makedirs({{ libname }}_path)
+    if not os.path.exists(${libname}_path):
+        os.makedirs(${libname}_path)
 
 filename:
   template: |
-    # File reference for {{ fileref }}
-    {{ fileref }}_path = "{{ path }}"
+    # File reference for ${fileref}
+    ${fileref}_path = "${path}"
     {% if options %}
-    # Options: {{ options|join(', ') }}
+    # Options: ${options|join(', ')}
     {% endif %}
 
 # Global Settings
@@ -523,32 +139,32 @@ options:
     import numpy as np
     
     # Set display options
-    pd.set_option('display.max_rows', {{ max_rows|default(None) }})
-    pd.set_option('display.max_columns', {{ max_columns|default(None) }})
+    pd.set_option('display.max_rows', ${max_rows|default(None)})
+    pd.set_option('display.max_columns', ${max_columns|default(None)})
     {% if format %}
-    pd.set_option('display.float_format', lambda x: '{{ format }}'.format(x))
+    pd.set_option('display.float_format', lambda x: '${format}'.format(x))
     {% endif %}
 
 # Macro System
 macro_variable:
   template: |
-    # Define macro variable {{ name }}
-    {{ name }} = {{ value }}
+    # Define macro variable ${name}
+    ${name} = ${value}
     {% if global %}
-    globals()['{{ name }}'] = {{ value }}
+    globals()['${name}'] = ${value}
     {% endif %}
 
 macro_definition:
   template: |
-    def {{ name }}({{ parameters|join(', ') }}):
-        """{{ description|default('SAS Macro Implementation') }}"""
+    def ${name}(${parameters|join(', ')}):
+        """${description|default('SAS Macro Implementation')}"""
         {% if error_handling %}
         try:
         {% endif %}
-            {{ content|indent(4) }}
+            ${content|indent(4)}
         {% if error_handling %}
         except Exception as e:
-            print("Error in macro : {}"\.format(name, str(e)))
+            print("Error in macro : {}".format(${name}, str(e)))
             return None
         {% endif %}
 
@@ -562,17 +178,17 @@ graphics_setup:
     plt.rcdefaults()
     
     # Set style and figure size
-    plt.style.use('{{ style|default("default") }}')
-    plt.figure(figsize=({{ width|default(10) }}, {{ height|default(6) }}))
+    plt.style.use('${style|default("default")}')
+    plt.figure(figsize=(${width|default(10)}, ${height|default(6)}))
 
 title_footnote:
   template: |
     {% if title %}
-    plt.title("{{ title }}")
+    plt.title("${title}")
     {% endif %}
     
     {% if footnote %}
-    plt.figtext(0.99, 0.01, "{{ footnote }}", 
+    plt.figtext(0.99, 0.01, "${footnote}", 
                 horizontalalignment='right', 
                 style='italic', 
                 size=8)
@@ -580,65 +196,65 @@ title_footnote:
 
 axis_definition:
   template: |
-    # Axis settings for {{ axis_name }}
-    plt.{{ axis }}axis(
-        label="{{ label }}",
+    # Axis settings for ${axis_name}
+    plt.${axis}axis(
+        label="${label}",
         {% if limits %}
-        limits=[{{ limits|join(', ') }}],
+        limits=[${limits|join(', ')}],
         {% endif %}
         {% if ticks %}
-        ticks=[{{ ticks|join(', ') }}],
+        ticks=[${ticks|join(', ')}],
         {% endif %}
     )
 
 proc_gchart:
   template: |
     {% if dataset and chart_type %}
-    # Create {{ chart_type }} chart
-    plt.figure(figsize=({{ width|default(10) }}, {{ height|default(6) }}))
+    # Create ${chart_type} chart
+    plt.figure(figsize=(${width|default(10)}, ${height|default(6)}))
     
     {% if chart_type == 'vbar' %}
     sns.barplot(
-        data={{ dataset }}_df,
-        x='{{ x_var }}',
-        y='{{ y_var }}'
-        {% if group %}, hue='{{ group }}'{% endif %}
-        {% if stat %}, estimator='{{ stat }}'{% endif %}
+        data=${dataset}_df,
+        x='${x_var}',
+        y='${y_var}'
+        {% if group %}, hue='${group}'{% endif %}
+        {% if stat %}, estimator='${stat}'{% endif %}
     )
     {% endif %}
     
-    plt.xticks(rotation={{ rotation|default(45) }})
+    plt.xticks(rotation=${rotation|default(45)})
     plt.tight_layout()
     {% endif %}
 
 # Format System
 proc_format:
   template: |
-    # Create format dictionary for {{ format_name }}
-    {{ format_name }}_format = {
+    # Create format dictionary for ${format_name}
+    ${format_name}_format = {
     {% for range, label in ranges.items() %}
-        {{ range }}: "{{ label }}"{% if not loop.last %},{% endif %}
+        ${range}: "${label}"{% if not loop.last %},{% endif %}
     {% endfor %}
     }
     
     {% if apply_to %}
     # Apply format to data
-    {{ dataset }}_df['{{ apply_to }}'] = {{ dataset }}_df['{{ apply_to }}'].map({{ format_name }}_format)
+    ${dataset}_df['${apply_to}'] = ${dataset}_df['${apply_to}'].map(${format_name}_format)
     {% endif %}
 
 # Hash Table Operations
 hash_table:
   template: |
     # Create hash table (lookup dictionary)
-    {{ hash_name }}_lookup = {{ dataset }}_df.set_index('{{ key_var }}')
+    ${hash_name}_lookup = ${dataset}_df.set_index('${key_var}')
     
     {% if data_vars %}
-    {{ hash_name }}_lookup = {{ hash_name }}_lookup[{{ data_vars|join(', ') }}].to_dict('index')
+    ${hash_name}_lookup = ${hash_name}_lookup[${data_vars|join(', ')}].to_dict('index')
     {% endif %}
     
-    def lookup_{{ hash_name }}(key):
-        """Lookup values in {{ hash_name }} hash table."""
-        return {{ hash_name }}_lookup.get(key, None)
+    def lookup_${hash_name}(key):
+        """Lookup values in ${hash_name} hash table."""
+        return ${hash_name}_lookup.get(key, None)
 
 # ODS Output
 ods:
@@ -646,11 +262,11 @@ ods:
     # ODS output configuration
     import matplotlib.pyplot as plt
     {% if style %}
-    plt.style.use('{{ style }}')
+    plt.style.use('${style}')
     {% endif %}
     
     {% if path %}
-    output_path = "{{ path }}"
+    output_path = "${path}"
     if not os.path.exists(output_path):
         os.makedirs(output_path)
     {% endif %}    
@@ -664,17 +280,17 @@ proc_print:
   template: |
     # Display dataset contents
     {% if variables %}
-    display_cols = [{{variables|join_quotes}}]
+    display_cols = [${variables|join_quotes}]
     print('\nDataset Contents (Selected Columns):')
-    print({{dataset}}_df[display_cols]{% if nobs %}.head({{nobs}}){% endif %})
+    print(${dataset}_df[display_cols]{% if nobs %}.head(${nobs}){% endif %})
     {% else %}
     print('\nDataset Contents:')
-    print({{dataset}}_df{% if nobs %}.head({{nobs}}){% endif %})
+    print(${dataset}_df{% if nobs %}.head(${nobs}){% endif %})
     {% endif %}
     
     {% if summary %}
     print('\nDataset Summary:')
-    print({{dataset}}_df.info())
+    print(${dataset}_df.info())
     {% endif %}
 
 proc_report:
@@ -715,19 +331,19 @@ proc_report:
             return result
     
     # Initialize report
-    report = ReportBuilder({{dataset}}_df)
+    report = ReportBuilder(${dataset}_df)
     
     {% if compute_blocks %}
     # Add compute blocks
     {% for block in compute_blocks %}
-    report.add_compute_block('{{block.name}}', lambda row: {{block.computation}})
+    report.add_compute_block('${block.name}', lambda row: ${block.computation})
     {% endfor %}
     {% endif %}
     
     {% if breaks %}
     # Add breaks and summaries
     {% for break in breaks %}
-    report.add_break('{{break.var}}', {{break.summaries}})
+    report.add_break('${break.var}', ${break.summaries})
     {% endfor %}
     {% endif %}
     
@@ -735,11 +351,11 @@ proc_report:
     result_df = report.generate()
     
     {% if order_vars %}
-    result_df = result_df.sort_values([{{order_vars|join_quotes}}])
+    result_df = result_df.sort_values([${order_vars|join_quotes}])
     {% endif %}
     
     print('\nDetailed Report:')
-    print(result_df{% if nobs %}.head({{nobs}}){% endif %})
+    print(result_df{% if nobs %}.head(${nobs}){% endif %})
 
 proc_format:
   template: |
@@ -771,25 +387,25 @@ proc_format:
             return self.value_map.get(value, str(value))
     
     # Create format
-    {{format_name}} = Format('{{format_name}}')
+    ${format_name} = Format('${format_name}')
     
     {% if values %}
     # Add individual values
     {% for value, label in values.items() %}
-    {{format_name}}.add_value({{value}}, {{label|repr}})
+    ${format_name}.add_value(${value}, ${label|repr})
     {% endfor %}
     {% endif %}
     
     {% if ranges %}
     # Add ranges
     {% for range in ranges %}
-    {{format_name}}.add_range({{range.start}}, {{range.end}}, {{range.label|repr}})
+    ${format_name}.add_range(${range.start}}, ${range.end}}, ${range.label|repr})
     {% endfor %}
     {% endif %}
     
     {% if picture %}
     # Set picture specification
-    {{format_name}}.set_picture('{{picture}}')
+    ${format_name}.set_picture('${picture}')
     {% endif %}
 
 proc_sgplot:
@@ -798,91 +414,91 @@ proc_sgplot:
     plt.figure(figsize=(10, 6))
     
     {% if scatter %}
-    sns.scatterplot(data={{dataset}}_df, x='{{x_var}}', y='{{y_var}}'{% if group_var %}, hue='{{group_var}}'{% endif %})
+    sns.scatterplot(data=${dataset}_df, x='${x_var}}', y='${y_var}}'{% if group_var %}, hue='${group_var}}'{% endif %})
     {% endif %}
     
     {% if reg %}
-    sns.regplot(data={{dataset}}_df, x='{{x_var}}', y='{{y_var}}',
+    sns.regplot(data=${dataset}_df, x='${x_var}}', y='${y_var}}',
         scatter_kws={'alpha': 0.5},
         line_kws={'color': 'red'})
     {% endif %}
     
     {% if histogram %}
-    sns.histplot(data={{dataset}}_df, x='{{x_var}}', bins={{bins|default(30)}})
+    sns.histplot(data=${dataset}_df, x='${x_var}}', bins=${bins|default(30)})
     {% endif %}
     
-    plt.title('{{title|default(plot_type + " of " + y_var + " vs " + x_var)}}')
-    plt.xlabel('{{x_label|default(x_var)}}')
-    plt.ylabel('{{y_label|default(y_var)}}')
+    plt.title('${title|default(plot_type + " of " + y_var + " vs " + x_var)}')
+    plt.xlabel('${x_label|default($x_var)}')
+    plt.ylabel('${y_label|default($y_var)}')
     plt.grid(True)
     plt.tight_layout()
     plt.show()
 
 macro:
   template: |
-    def {{macro_name}}({{python_params}}):
+    def ${macro_name}(${python_params}):
         """
-        Python function converted from SAS macro {{macro_name}}.
+        Python function converted from SAS macro ${macro_name}.
         {% if docstring %}
-        {{docstring}}
+        ${docstring}
         {% endif %}
         """
-        {{body|indent(8)}}
+        ${body|indent(8)}
 
 macro_let:
   template: |
     {% if is_scan %}
-    {{var_name}} = {{list_var}}.split()[{{index}}]
+    ${var_name} = ${list_var}.split()[${index}}]
     {% elif is_eval %}
-    {{var_name}} = {{expr}}
+    ${var_name} = ${expr}}
     {% elif is_numeric %}
-    {{var_name}} = {{value}}
+    ${var_name} = ${value}}
     {% else %}
-    {{var_name}} = {{value|repr}}
+    ${var_name} = ${value|repr}}
     {% endif %}
 
 filename:
   template: |
     # Define file reference
-    {{fileref}}_path = {{filepath|repr}}
+    ${fileref}_path = ${filepath|repr}
     
-    def read_{{fileref}}(encoding='utf-8'):
-        """Read contents of {{fileref}} file."""
+    def read_${fileref}(encoding='utf-8'):
+        """Read contents of ${fileref} file."""
         try:
-            with open({{fileref}}_path, 'r', encoding=encoding) as f:
+            with open(${fileref}_path, 'r', encoding=encoding) as f:
                 return f.read()
         except Exception as e:
-            print('Error reading {{{fileref}}_path}: {}'\.format(e))
+            print('Error reading ${fileref}_path: {}'.format(e))
             return None
 
 title_footnote:
   template: |
     {% if type == 'title' %}
-    plt.title({{text|repr}})
+    plt.title(${text|repr})
     {% else %}
-    plt.figtext(0.99, 0.01, {{text|repr}}, ha='right', va='bottom', style='italic')
+    plt.figtext(0.99, 0.01, ${text|repr}, ha='right', va='bottom', style='italic')
     {% endif %}
 
 # Helper templates for expressions and conditions
 sas_expression:
   template: |
     {% if function %}
-    {{function}}({{arguments|join(', ')}})
+    ${function}(${arguments|join(', ')}})
     {% else %}
-    {{expression}}
+    ${expression}}
     {% endif %}
 
 where_clause:
   template: |
     {% for condition in conditions %}
-    {{condition}}{% if not loop.last %} & {% endif %}
+    ${condition}}{% if not loop.last %} & {% endif %}
     {% endfor %}
 
 null_data_step:
   template: |
     # Null data step for data manipulation without output dataset
     {% for statement in statements %}
-    {{statement}}
+    ${statement}}
     {% endfor %}
 
 # Add these missing templates...
@@ -890,60 +506,60 @@ null_data_step:
 sql_condition:
   template: |
     {% if operator %}
-    {{left_operand}} {{operator}} {{right_operand}}
+    ${left_operand}} ${operator} ${right_operand}}
     {% else %}
-    {{expression}}
+    ${expression}}
     {% endif %}
 
 sql_expression:
   template: |
     {% if function %}
-    {{function}}({{arguments|join(', ')}})
+    ${function}(${arguments|join(', ')}})
     {% elif case_when %}
-    np.select([{{conditions|join(', ')}}], [{{values|join(', ')}}], default={{default|default('np.nan')}})
+    np.select([${conditions|join(', ')}}], [${values|join(', ')}}], default=${default|default('np.nan')}})
     {% else %}
-    {{expression}}
+    ${expression}}
     {% endif %}
 
 complex_sql:
   template: |
     # Complex SQL operation
     {% for step in steps %}
-    # Step {{loop.index}}: {{step.description}}
-    {{step.code}}
+    # Step ${loop.index}}: ${step.description}}
+    ${step.code}}
     {% endfor %}
 
 macro_condition:
   template: |
     {% if comparison %}
-    {{left_operand}} {{operator}} {{right_operand}}
+    ${left_operand}} ${operator} ${right_operand}}
     {% else %}
-    {{condition}}
+    ${condition}}
     {% endif %}
 
 macro_action:
   template: |
     {% if assignment %}
-    {{variable}} = {{value}}
+    ${variable}} = ${value}}
     {% elif function_call %}
-    {{function}}({{arguments|join(', ')}})
+    ${function}(${arguments|join(', ')}})
     {% else %}
-    {{action}}
+    ${action}}
     {% endif %}
 
 macro_statement:
   template: |
     {% if type == 'i' %}
-    if {{condition}}:
-        {{action|indent(4)}}
+    if ${condition}}:
+        ${action|indent(4)}}
     {% endif %}
     {% if statements %}
     {% for stmt in statements %}
-    {{stmt}}
+    ${stmt}}
     {% endfor %}
     {% endif %}
     {% if statement %}
-    {{statement}}
+    ${statement}}
     {% endif %}
 
 ods_graphics:
@@ -951,36 +567,36 @@ ods_graphics:
     # Configure graphics settings
     plt.style.use('.format() == 'do' %)seaborn')
     plt.rcParams.update({
-        'figure.figsize': ({{width|default(10)}}, {{height|default(6)}}),
-        'figure.dpi': {{dpi|default(100)}},
-        'savefig.dpi': {{output_dpi|default(300)}},
-        'font.size': {{font_size|default(10)}},
-        'axes.titlesize': {{title_size|default(12)}},
-        'axes.labelsize': {{label_size|default(10)}},
+        'figure.figsize': (${width|default(10)}, ${height|default(6)}}),
+        'figure.dpi': ${dpi|default(100)}},
+        'savefig.dpi': ${output_dpi|default(300)}},
+        'font.size': ${font_size|default(10)}},
+        'axes.titlesize': ${title_size|default(12)}},
+        'axes.labelsize': ${label_size|default(10)}},
         'axes.grid': True
     })
     {% if style %}
-    sns.set_theme(style='{{style}}')
+    sns.set_theme(style='${style}')
     {% endif %}
 
 format:
   template: |
     # Define custom format
-    def format_{{name}}(value):
-        """Apply {{name}} format to value."""
+    def format_${name}(value):
+        """Apply ${name} format to value."""
         {% if numeric %}
-        return '{{"{"}}{value:{{format_spec}}}{"}}'.format(")
+        return '${{"{}}{value:${format_spec}}}{"}}'.format(")
         {% else %}
-        return str(value).{{alignment}}({{width}}){% if truncate %}.[:{{width}}]{% endif %}
+        return str(value).${alignment}(${width}){% if truncate %}.[:${width}}]{% endif %}
 
 sas_condition:
   template: |
     {% if complex %}
     {% for condition in conditions %}
-    ({{condition}}){% if not loop.last %} {{logical_op}} {% endif %}
+    (${condition}){% if not loop.last %} ${logical_op} {% endif %}
     {% endfor %}
     {% else %}
-    {{left_operand}} {{operator}} {{right_operand}}
+    ${left_operand}} ${operator} ${right_operand}}
     {% endif %}
 
 macro_variable:
@@ -988,24 +604,24 @@ macro_variable:
     # Handle macro variable operations
     {% if type == 'let' %}
     {% if is_scan %}
-    {{var_name}} = {{list_var}}.split()[{{index}}]
+    ${var_name} = ${list_var}.split()[${index}}]
     {% elif is_eval %}
-    {{var_name}} = {{expr}}
+    ${var_name} = ${expr}}
     {% elif is_numeric %}
-    {{var_name}} = {{value}}
+    ${var_name} = ${value}}
     {% else %}
-    {{var_name}} = {{value|repr}}
+    ${var_name} = ${value|repr}}
     {% endif %}
     {% elif type == 'global' %}
     # Define global macro variable
-    global {{var_name}}
-    {{var_name}} = {{value|repr}}
+    global ${var_name}
+    ${var_name} = ${value|repr}
     {% elif type == 'symput' %}
     # Set macro variable value
-    {{var_name}} = str({{value}})
+    ${var_name} = str(${value}})
     {% elif type == 'symget' %}
     # Get macro variable value
-    {{var_name}} = {{source_var}}
+    ${var_name} = ${source_var}}
     {% endif %}
 
 # Reorganize templates into categories
@@ -1061,11 +677,11 @@ data_step_operations:
   merge:
     template: |
       # MERGE operation
-      {{output_dataset}}_df = pd.merge(
-          {{left_dataset}}_df,
-          {{right_dataset}}_df,
-          how='{{merge_type}}',
-          on=[{{by_vars|join_quotes}}]
+      ${output_dataset}_df = pd.merge(
+          ${left_dataset}_df,
+          ${right_dataset}_df,
+          how='${merge_type}}',
+          on=[${by_vars|join_quotes}}]
       )
 
   update:
@@ -1088,10 +704,10 @@ data_step_operations:
           
           return merged.drop([col + '_update' for col in update_cols], axis=1)
       
-      {{output_dataset}}_df = update_dataset(
-          {{base_dataset}}_df,
-          {{update_dataset}}_df,
-          [{{by_vars|join_quotes}}]
+      ${output_dataset}_df = update_dataset(
+          ${base_dataset}_df,
+          ${update_dataset}_df,
+          [${by_vars|join_quotes}}]
       )
 
   array:
@@ -1107,7 +723,7 @@ data_step_operations:
           def validate_columns(self):
               missing = [col for col in self.columns if col not in self.df.columns]
               if missing:
-                  raise ValueError("Columns not found: {}"\.format(missing))
+                  raise ValueError("Columns not found: {}".format(missing))
           
           def apply(self, func):
               """Apply function to all array elements."""
@@ -1122,30 +738,30 @@ data_step_operations:
               """Mean across array elements."""
               return self.df[self.columns].mean(axis=1)
       
-      {{array_name}} = SASArray(
-          {{dataset}}_df,
-          [{{columns|join_quotes}}],
-          '{{array_name}}'
+      ${array_name} = SASArray(
+          ${dataset}_df,
+          [${columns|join_quotes}],
+          '${array_name}'
       )
 
   do_loop:
     template: |
       # DO loop implementation
       {% if type == 'iterative' %}
-      for {{var}} in range({{start}}, {{end}} + 1{% if by %}, {{by}}{% endif %}):
-          {{body|indent(4)}}
+      for ${var}} in range(${start}}, ${end}} + 1{% if by %}, ${by}}{% endif %}):
+          ${body|indent(4)}}
       {% elif type == 'until' %}
-      {{var}} = {{start}}
+      ${var}} = ${start}}
       while True:
-          {{body|indent(4)}}
-          if {{condition}}:
+          ${body|indent(4)}}
+          if ${condition}}:
               break
-          {{var}} += {% if by %}{{by}}{% else %}1{% endif %}
+          ${var}} += {% if by %}${by}}{% else %}1{% endif %}
       {% elif type == 'while' %}
-      {{var}} = {{start}}
-      while {{condition}}:
-          {{body|indent(4)}}
-          {{var}} += {% if by %}{{by}}{% else %}1{% endif %}
+      ${var}} = ${start}}
+      while ${condition}}:
+          ${body|indent(4)}}
+          ${var}} += {% if by %}${by}}{% else %}1{% endif %}
       {% endif %}
 
   retain:
@@ -1161,8 +777,8 @@ data_step_operations:
               return self.value
       
       {% for var in retained_vars %}
-      {{var}}_retained = RetainedVariable({{initial_values.get(var, 'None')}})
-      {{dataset}}_df['{{var}}'] = {{dataset}}_df['{{var}}'].apply({{var}}_retained.update)
+      ${var}_retained = RetainedVariable(${initial_values.get(var, 'None')}})
+      ${dataset}_df['${var}'] = ${dataset}_df['${var}'].apply(${var}_retained.update)
       {% endfor %}
 
 sql_operations:
@@ -1172,9 +788,9 @@ sql_operations:
       def execute_subquery(main_df, sub_df, condition):
           """Execute a subquery operation."""
           if condition.get('type') == 'exists':
-              return main_df[main_df['{{key}}'].isin(sub_df['{{sub_key}}'])]
+              return main_df[main_df['${key}'].isin(sub_df['${sub_key}'])]
           elif condition.get('type') == 'not_exists':
-              return main_df[~main_df['{{key}}'].isin(sub_df['{{sub_key}}'])]
+              return main_df[~main_df['${key}'].isin(sub_df['${sub_key}'])]
           return main_df
 
   set_operations:
@@ -1227,7 +843,7 @@ error_handling:
               self.message = message
               self.sas_code = sas_code
               self.component_type = component_type
-              super().__init__("{component_type} Error: {message}\nSAS Code: {}"\.format(sas_code))
+              super().__init__("{component_type} Error: {message}\nSAS Code: {}".format(sas_code))
 
   logging_setup:
     template: |
@@ -1315,7 +931,7 @@ error_handling_extensions:
             self.message = message
             self.component_type = component_type
             self.details = details
-            super().__init__("{component_type} Validation Error: {}"\.format(message))
+            super().__init__("{component_type} Validation Error: {}".format(message))
 
     class ValidationRules:
         @staticmethod
@@ -2194,23 +1810,23 @@ proc_dataset_operations:
     template: |
       {% if base_df and data_df %}
       # Append datasets
-      result_df = pd.concat([{{ base_df }}, {{ data_df }}[{{ base_df }}.columns]], ignore_index=True)
+      result_df = pd.concat([${ base_df }, ${ data_df }[${ base_df }.columns]], ignore_index=True)
       {% endif %}
 
   modify:
     template: |
       {% if df and modifications %}
       # Modify dataset
-      result_df = {{ df }}.copy()
+      result_df = ${ df }.copy()
       {% for mod in modifications %}
       {% if mod.type == 'rename' %}
-      result_df = result_df.rename(columns={{ mod.mapping }})
+      result_df = result_df.rename(columns=${ mod.mapping })
       {% elif mod.type == 'label' %}
       result_df.attrs['labels'] = result_df.attrs.get('labels', )
-      result_df.attrs['labels'].update({{ mod.labels }})
+      result_df.attrs['labels'].update(${ mod.labels })
       {% elif mod.type == 'format' %}
       result_df.attrs['formats'] = result_df.attrs.get('formats', )
-      result_df.attrs['formats'].update({{ mod.formats }})
+      result_df.attrs['formats'].update(${ mod.formats })
       {% endif %}
       {% endfor %}
       {% endif %}
@@ -2304,16 +1920,16 @@ output_handling_enhanced:
 proc_transpose:
   template: |
     {% if dataset %}
-    # Transpose {{ dataset }}
+    # Transpose ${dataset}
     {% if by_vars %}
-    grouped = {{ dataset }}_df.groupby([{{ by_vars|join(', ') }}])
+    grouped = ${dataset}_df.groupby([${by_vars|join(', ')}])
     {% endif %}
     
     {% if var_vars %}
-    result_df = {{ dataset }}_df.pivot(
-        {% if by_vars %}index={{ by_vars|join(', ') }},{% endif %}
-        {% if id_var %}columns='{{ id_var }}',{% endif %}
-        values=[{{ var_vars|join(', ') }}]
+    result_df = ${dataset}_df.pivot(
+        {% if by_vars %}index=${by_vars|join(', ')},{% endif %}
+        {% if id_var %}columns='${id_var}',{% endif %}
+        values=[${var_vars|join(', ')}]]
     )
     {% endif %}
     {% endif %}
@@ -2322,24 +1938,27 @@ proc_transpose:
 proc_freq:
   template: |
     {% if dataset %}
-    # Frequency analysis for {{ dataset }}
+    # Frequency analysis for ${dataset}
     {% if tables %}
-    {% for table in tables %}
-    # Frequency table for {{ table }}
-    freq_table = pd.crosstab(
-        {{ dataset }}_df['{{ table.rows }}'],
-        {% if table.cols %}{{ dataset }}_df['{{ table.cols }}'],{% endif %}
-        margins=True
-    )
-    
-    {% if table.chisq %}
-    from scipy.stats import chi2_contingency
-    chi2, p_value, dof, expected = chi2_contingency(freq_table)
-    print("\nChi-square test results:")
-    print("Chi2 statistic: {:.4f}".format(chi2))
-    print("p-value: {:.4f}".format(p_value))
-    {% endif %}
-    {% endfor %}
+    for table in ${tables}:
+        # Frequency table for ${table}
+        freq_table = pd.crosstab(
+            ${dataset}_df[table['rows']],
+            ${dataset}_df[table['cols']] if 'cols' in table else None,
+            margins=True
+        )
+        
+        print('\nFrequency Table:')
+        print(freq_table)
+        
+        {% if chisq %}
+        # Chi-square test if requested
+        from scipy.stats import chi2_contingency
+        chi2, p_value, dof, expected = chi2_contingency(freq_table)
+        print("\nChi-square test results:")
+        print(f"Chi2 statistic: {chi2:.4f}")
+        print(f"p-value: {p_value:.4f}")
+        {% endif %}
     {% endif %}
     {% endif %}
 
@@ -2353,10 +1972,10 @@ proc_anova:
     from statsmodels.stats.multicomp import pairwise_tukeyhsd
     
     # Prepare data
-    model_data = {{ dataset }}_df.dropna(subset=['{{ dependent }}'] + [{{ class_vars|join(', ') }}])
+    model_data = ${dataset}_df.dropna(subset=['${dependent}'] + [${class_vars|join(', ')}])
     
     # One-way ANOVA
-    groups = [group for _, group in model_data.groupby('{{ class_vars[0] }}')['{{ dependent }}']]
+    groups = [group for _, group in model_data.groupby('${class_vars[0]}')['${dependent}']]
     f_stat, p_value = stats.f_oneway(*groups)
     
     print("\nOne-way ANOVA Results:")
@@ -2365,8 +1984,8 @@ proc_anova:
     
     # Post-hoc Tukey test
     tukey = pairwise_tukeyhsd(
-        model_data['{{ dependent }}'],
-        model_data['{{ class_vars[0] }}']
+        model_data['${dependent}'],
+        model_data['${class_vars[0]}']
     )
     print("\nTukey's HSD Test Results:")
     print(tukey)
@@ -2377,7 +1996,7 @@ proc_anova:
     
     # Box plot
     plt.figure(figsize=(10, 6))
-    sns.boxplot(x='{{ class_vars[0] }}', y='{{ dependent }}', data=model_data)
+    sns.boxplot(x='${class_vars[0]}', y='${dependent}', data=model_data)
     plt.title('Distribution by Group')
     plt.show()
     {% endif %}
@@ -2392,14 +2011,14 @@ proc_glm:
     import numpy as np
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
+    X = ${dataset}_df[[${independent|join(', ')}]]
     {% if class_vars %}
     # Add dummy variables for categorical predictors
-    X = pd.get_dummies({{ dataset }}_df[[{{ independent|join(', ') }}, {{ class_vars|join(', ') }}]], 
-                      columns=[{{ class_vars|join(', ') }}])
+    X = pd.get_dummies(${dataset}_df[[${independent|join(', ')}], ${class_vars|join(', ')}]], 
+                      columns=[${class_vars|join(', ')}])
     {% endif %}
     X = sm.add_constant(X)
-    y = {{ dataset }}_df['{{ dependent }}']
+    y = ${dataset}_df['${dependent}']
     
     # Fit model
     model = sm.OLS(y, X).fit()
@@ -2447,16 +2066,16 @@ proc_mixed:
     import statsmodels.formula.api as smf
     
     # Construct formula
-    fixed_effects_str = ' + '.join([{{ fixed_effects|join(' + ') }}])
+    fixed_effects_str = ' + '.join([${fixed_effects|join(' + ')}])
     {% if random_effects %}
-    random_effects_str = ' + '.join([{{ random_effects|join(' + ') }}])
-    formula = "{{ dependent }} ~ " + fixed_effects_str + " + (1|" + random_effects_str + ")"
+    random_effects_str = ' + '.join([${random_effects|join(' + ')}])
+    formula = "${dependent} ~ " + fixed_effects_str + " + (1|" + random_effects_str + ")"
     {% else %}
-    formula = "{{ dependent }} ~ " + fixed_effects_str
+    formula = "${dependent} ~ " + fixed_effects_str
     {% endif %}
     
     # Fit mixed model
-    model = smf.mixedlm(formula, data={{ dataset }}_df, groups={{ dataset }}_df['{{ groups }}'])
+    model = smf.mixedlm(formula, data=${dataset}_df, groups=${dataset}_df['${groups}'])
     results = model.fit()
     
     print("\nMixed Model Results:")
@@ -2484,8 +2103,8 @@ proc_logistic:
     from sklearn.metrics import classification_report, roc_curve, auc
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ independent|join(', ') }}]]
-    y = {{ dataset }}_df['{{ dependent }}']
+    X = ${dataset}_df[[${independent|join(', ')}]]
+    y = ${dataset}_df['${dependent}']
     
     # Fit model
     model = LogisticRegression(random_state=42)
@@ -2497,7 +2116,7 @@ proc_logistic:
     
     print("\nLogistic Regression Results:")
     print("\nModel Coefficients:")
-    for var, coef in zip([{{ independent|join(', ') }}], model.coef_[0]):
+    for var, coef in zip([${independent|join(', ')}], model.coef_[0]):
         print(": {:.4f}".format(var, coef))
     print("\nIntercept: {:.4f}".format(model.intercept_[0]))
     
@@ -2533,7 +2152,7 @@ proc_cluster:
     from sklearn.preprocessing import StandardScaler
     
     # Prepare and scale data
-    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    X = ${dataset}_df[[${variables|join(', ')}]]
     X_scaled = StandardScaler().fit_transform(X)
     
     # Perform hierarchical clustering
@@ -2543,17 +2162,17 @@ proc_cluster:
     from sklearn.cluster import AgglomerativeClustering
     
     # Create clusters
-    cluster = AgglomerativeClustering(n_clusters={{ n_clusters }})
+    cluster = AgglomerativeClustering(n_clusters=${n_clusters})
     cluster_labels = cluster.fit_predict(X_scaled)
     
     # Add cluster labels to dataset
-    {{ dataset }}_df['Cluster'] = cluster_labels
+    ${dataset}_df['Cluster'] = cluster_labels
     
     print("\nCluster Sizes:")
-    print({{ dataset }}_df['Cluster'].value_counts())
+    print(${dataset}_df['Cluster'].value_counts())
     
     print("\nCluster Means:")
-    print({{ dataset }}_df.groupby('Cluster')[[{{ variables|join(', ') }}]].mean())
+    print(${dataset}_df.groupby('Cluster')[[${variables|join(', ')}]]].mean())
     {% endif %}
     
     {% if plots %}
@@ -2569,11 +2188,11 @@ proc_cluster:
     plt.show()
     
     # Cluster visualization (if 2 or 3 variables)
-    if len([{{ variables|join(', ') }}]) == 2:
+    if len([${variables|join(', ')}]) == 2:
         plt.figure(figsize=(8, 6))
-        sns.scatterplot(data={{ dataset }}_df, 
-                       x='{{ variables[0] }}', 
-                       y='{{ variables[1] }}',
+        sns.scatterplot(data=${dataset}_df, 
+                       x='${variables[0]}', 
+                       y='${variables[1]}',
                        hue='Cluster',
                        palette='deep')
         plt.title('Cluster Plot')
@@ -2591,7 +2210,7 @@ proc_factor:
     import numpy as np
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    X = ${dataset}_df[[${variables|join(', ')}]]
     
     # KMO test
     kmo_all, kmo_model = calculate_kmo(X)
@@ -2611,7 +2230,7 @@ proc_factor:
     loadings = pd.DataFrame(
         fa.loadings_,
         columns=['Factor'.format(i+1) for i in range(n_factors)],
-        index=[{{ variables|join(', ') }}]
+        index=[${variables|join(', ')}]]
     )
     
     print('\nFactor Loadings:')
@@ -2656,8 +2275,8 @@ proc_discrim:
     from sklearn.metrics import classification_report, confusion_matrix
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
-    y = {{ dataset }}_df['{{ class_var }}']
+    X = ${dataset}_df[[${variables|join(', ')}]]
+    y = ${dataset}_df['${class_var}']
     
     # Fit LDA
     lda = LinearDiscriminantAnalysis()
@@ -2687,7 +2306,7 @@ proc_discrim:
     plt.show()
     
     # If 2 variables, plot decision boundary
-    if len([{{ variables|join(', ') }}]) == 2:
+    if len([${variables|join(', ')}]) == 2:
         plt.figure(figsize=(10, 6))
         plot_decision_boundary(lda, X, y)
         plt.title('LDA Decision Boundary')
@@ -2704,7 +2323,7 @@ proc_princomp:
     from sklearn.preprocessing import StandardScaler
     
     # Prepare and scale data
-    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
+    X = ${dataset}_df[[${variables|join(', ')}]]
     X_scaled = StandardScaler().fit_transform(X)
     
     # Perform PCA
@@ -2723,7 +2342,7 @@ proc_princomp:
     loadings = pd.DataFrame(
         pca.components_.T,
         columns=['PC'.format(i+1) for i in range(len(var_exp))],
-        index=[{{ variables|join(', ') }}]
+        index=[${variables|join(', ')}]]
     )
     print('\nComponent Loadings:')
     print(loadings)
@@ -2743,10 +2362,10 @@ proc_princomp:
     plt.show()
     
     # Biplot (if 2 components)
-    if len([{{ variables|join(', ') }}]) >= 2:
+    if len([${variables|join(', ')}]) >= 2:
         plt.figure(figsize=(10, 8))
         plt.scatter(pca_result[:, 0], pca_result[:, 1])
-        for i, var in enumerate([{{ variables|join(', ') }}]):
+        for i, var in enumerate([${variables|join(', ')}]]):
             plt.arrow(0, 0, 
                      loadings.iloc[i, 0] * max(pca_result[:, 0]),
                      loadings.iloc[i, 1] * max(pca_result[:, 1]),
@@ -2771,12 +2390,12 @@ proc_manova:
     import pandas as pd
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ dependent_vars|join(', ') }}]]
-    grouping = {{ dataset }}_df['{{ class_vars[0] }}']
+    X = ${dataset}_df[[${dependent_vars|join(', ')}]]
+    grouping = ${dataset}_df['${class_vars[0]}']
     
     # Fit MANOVA
-    manova = MANOVA.from_formula('{{ dependent_vars|join(' + ') }} ~ {{ class_vars[0] }}', 
-                                data={{ dataset }}_df)
+    manova = MANOVA.from_formula('${dependent_vars|join(' + ')} ~ ${class_vars[0]}', 
+                                data=${dataset}_df)
     result = manova.mv_test()
     
     print("\nMANOVA Results:")
@@ -2784,9 +2403,9 @@ proc_manova:
     
     # Univariate follow-up
     print("\nUnivariate Follow-up Tests:")
-    for dv in [{{ dependent_vars|join(', ') }}]:
+    for dv in [${dependent_vars|join(', ')}]:
         from scipy import stats
-        groups = [group for _, group in {{ dataset }}_df.groupby('{{ class_vars[0] }}')[dv]]
+        groups = [group for _, group in ${dataset}_df.groupby('${class_vars[0]}')[dv]]
         f_stat, p_val = stats.f_oneway(*groups)
         print("\n:".format(dv))
         print("F-statistic: {:.4f}".format(f_stat))
@@ -2797,11 +2416,11 @@ proc_manova:
     import seaborn as sns
     
     # Box plots for each dependent variable
-    fig, axes = plt.subplots(1, len([{{ dependent_vars|join(', ') }}]), 
+    fig, axes = plt.subplots(1, len([${dependent_vars|join(', ')}]), 
                             figsize=(15, 5))
-    for i, dv in enumerate([{{ dependent_vars|join(', ') }}]):
-        sns.boxplot(x='{{ class_vars[0] }}', y=dv, 
-                   data={{ dataset }}_df, ax=axes[i])
+    for i, dv in enumerate([${dependent_vars|join(', ')}]):
+        sns.boxplot(x='${class_vars[0]}', y=dv, 
+                   data=${dataset}_df, ax=axes[i])
         axes[i].set_title(dv)
     plt.tight_layout()
     plt.show()
@@ -2819,10 +2438,10 @@ proc_timeseries:
     import pandas as pd
     
     # Prepare time series data
-    ts_data = {{ dataset }}_df.set_index('{{ time_var }}')['{{ value_var }}']
+    ts_data = ${dataset}_df.set_index('${time_var}')['${value_var}']
     
     # Decomposition
-    decomposition = seasonal_decompose(ts_data, period={{ period|default(12) }})
+    decomposition = seasonal_decompose(ts_data, period=${period|default(12)})
     
     # Stationarity test
     adf_test = adfuller(ts_data)
@@ -2831,13 +2450,13 @@ proc_timeseries:
     print('p-value: {:.4f}'.format(adf_test[1]))
     
     # ARIMA modeling
-    model = ARIMA(ts_data, order=({{ p|default(1) }}, {{ d|default(1) }}, {{ q|default(1) }}))
+    model = ARIMA(ts_data, order=(${p|default(1)}, ${d|default(1)}, ${q|default(1)}))
     results = model.fit()
     print('\nARIMA Model Summary:')
     print(results.summary())
     
     # Forecasting
-    forecast = results.forecast(steps={{ forecast_steps|default(12) }})
+    forecast = results.forecast(steps=${forecast_steps|default(12)})
     
     {% if plots %}
     import matplotlib.pyplot as plt
@@ -2874,8 +2493,8 @@ proc_survival:
     from lifelines import CoxPHFitter
     
     # Prepare data
-    time = {{ dataset }}_df['{{ time_var }}']
-    event = {{ dataset }}_df['{{ event_var }}']
+    time = ${dataset}_df['${time_var}']
+    event = ${dataset}_df['${event_var}']
     
     # Kaplan-Meier estimation
     kmf = KaplanMeierFitter()
@@ -2887,13 +2506,13 @@ proc_survival:
     {% if covariates %}
     # Cox Proportional Hazards
     cph = CoxPHFitter()
-    cph.fit({{ dataset }}_df[[
-        '{{ time_var }}', 
-        '{{ event_var }}',
-        {{ covariates|join(', ') }}
+    cph.fit(${dataset}_df[[
+        '${time_var}', 
+        '${event_var}',
+        ${covariates|join(', ')}
     ]], 
-    duration_col='{{ time_var }}',
-    event_col='{{ event_var }}')
+    duration_col='${time_var}',
+    event_col='${event_var}')
     
     print('\nCox Proportional Hazards Model:')
     print(cph.print_summary())
@@ -2911,13 +2530,13 @@ proc_survival:
     {% if strata_var %}
     # Stratified survival curves
     fig, ax = plt.subplots(figsize=(10, 6))
-    for value in {{ dataset }}_df['{{ strata_var }}'].unique():
-        mask = {{ dataset }}_df['{{ strata_var }}'] == value
+    for value in ${dataset}_df['${strata_var}'].unique():
+        mask = ${dataset}_df['${strata_var}'] == value
         kmf_strata = KaplanMeierFitter()
         kmf_strata.fit(
             time[mask], 
             event[mask],
-            label='='.format('{{ strata_var }}', value)
+            label='='.format('${strata_var}', value)
         )
         kmf_strata.plot(ax=ax)
     plt.title('Stratified Survival Curves')
@@ -2926,7 +2545,7 @@ proc_survival:
     
     {% if covariates %}
     # Cox model plots
-    cph.plot_partial_effects('{{ covariates[0] }}')
+    cph.plot_partial_effects('${covariates[0]}')
     plt.title('Partial Effect Plot')
     plt.show()
     {% endif %}
@@ -2942,8 +2561,8 @@ proc_candisc:
     from sklearn.preprocessing import StandardScaler
     
     # Prepare data
-    X = {{ dataset }}_df[[{{ variables|join(', ') }}]]
-    y = {{ dataset }}_df['{{ class_var }}']
+    X = ${dataset}_df[[${variables|join(', ')}]]
+    y = ${dataset}_df['${class_var}']
     
     # Scale features
     X_scaled = StandardScaler().fit_transform(X)
@@ -2963,7 +2582,7 @@ proc_candisc:
     structure = np.corrcoef(X_scaled.T, X_canon.T)[:len(X.columns), -len(canon_corr):]
     struct_df = pd.DataFrame(
         structure,
-        index=[{{ variables|join(', ') }}],
+        index=[${variables|join(', ')}],
         columns=['Can'.format(i+1) for i in range(len(canon_corr))]
     )
     

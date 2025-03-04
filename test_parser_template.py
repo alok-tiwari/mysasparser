@@ -17,7 +17,7 @@ import yaml
 import pandas as pd
 
 def test_parser():
-    """Test the SAS parser functionality."""
+    # Test SAS Parser
     parser = SASParser()
     components = parser.parse_file("mock_data/sample.sas")
     
@@ -163,14 +163,12 @@ def test_end_to_end_conversion(input_dir, output_dir):
     
     # Initialize components with explicit embedding dimension
     parser = SASParser()
-    embedding_gen = EmbeddingGenerator(embedding_dim=4096)
+    embedding_gen = EmbeddingGenerator(embedding_dim=4096)  # Explicit dimension
     vector_store = VectorStore(persist_directory="chroma_db")
-    
-    # Initialize converter early to use its collection mapping
     converter = SASPythonConverter(
         vector_store=vector_store,
         output_directory=output_dir,
-        embedding_generator=embedding_gen
+        embedding_generator=embedding_gen  # Pass the instance
     )
     
     # Process all files in directory
@@ -178,10 +176,8 @@ def test_end_to_end_conversion(input_dir, output_dir):
     total_components = 0
     all_embeddings = []
     
-    print("\nStep 1: Parsing and Generating Embeddings...")
-    for sas_file in glob.glob(os.path.join(input_dir, "*.sas")):
-        print(f"\nProcessing {sas_file}...")
-        components = parser.parse_file(sas_file)
+    print("\nStep 1: Parsing SAS files...")
+    for components in parser.parse_directory(input_dir):
         if components:
             total_files += 1
             total_components += len(components)
@@ -190,33 +186,22 @@ def test_end_to_end_conversion(input_dir, output_dir):
             print(f"Generating embeddings for {len(components)} components...")
             embeddings = embedding_gen.generate_embeddings(components)
             all_embeddings.extend(embeddings)
-            print(f"Generated {len(embeddings)} embeddings")
-            
-            # Store embeddings using vector_store's method
-            print("Storing embeddings in vector store...")
-            vector_store.store_embeddings(embeddings)
     
     print(f"\nParsed {total_files} files with {total_components} components")
-    print(f"Generated and stored {len(all_embeddings)} embeddings")
     
-    print("\nStep 3: Converting SAS to Python using embeddings...")
-    converted_files = []
+    print("\nStep 2: Storing embeddings in vector database...")
+    vector_store.store_embeddings(all_embeddings)
+    print(f"Stored {len(all_embeddings)} embeddings")
     
-    for sas_file in glob.glob(os.path.join(input_dir, "*.sas")):
-        print(f"\nConverting {sas_file}...")
-        try:
-            # Use the converter with vector store to convert file
-            output_file = converter.convert_file(sas_file)
-            if output_file:
-                converted_files.append(output_file)
-                print(f"✓ Successfully converted to {output_file}")
-            else:
-                print(f"✗ Failed to convert {sas_file}")
-        except Exception as e:
-            print(f"✗ Error converting {sas_file}: {str(e)}")
+    print("\nStep 3: Converting SAS to Python...")
+    # Convert the directory
+    converted_files = converter.convert_directory(input_dir)
+    print(f"Converted {len(converted_files)} files to Python")
     
-    print(f"\nConverted {len(converted_files)} files to Python")
+    print("\nConversion complete!")
+    print(f"Output Python files are in: {output_dir}")
     
+    # Return summary
     return {
         "files_processed": total_files,
         "components_found": total_components,
@@ -315,49 +300,9 @@ def clean_output_directory(output_dir: str):
     except Exception as e:
         print(f"Error cleaning output directory: {str(e)}")
 
-def test_converter():
-    """Test the SAS to Python converter."""
-    print("\n=== Testing SAS to Python Converter ===")
-    
-    try:
-        # Initialize converter
-        converter = SASPythonConverter(output_directory="./mock_output")
-        
-        # Convert test files
-        if os.path.exists("./mock_data"):
-            sas_files = glob.glob(os.path.join("./mock_data", "*.sas"))
-            
-            if not sas_files:
-                print("No SAS files found in ./mock_data")
-                return
-            
-            success_count = 0
-            error_count = 0
-            
-            for sas_file in sas_files:
-                try:
-                    print(f"\nConverting {sas_file}")
-                    parser = SASParser()
-                    components = parser.parse_file(sas_file)
-                    python_files = converter.convert_to_python(components, sas_file)
-                    success_count += 1
-                    print(f"✓ Successfully converted to Python")
-                except Exception as e:
-                    error_count += 1
-                    print(f"✗ Error converting file: {str(e)}")
-            
-            print(f"\nConversion complete:")
-            print(f"Successfully converted: {success_count}")
-            print(f"Failed conversions: {error_count}")
-            
-    except Exception as e:
-        print(f"✗ Error initializing converter: {str(e)}")
-        return False
-    
-    return True
-
 def main():
-    parser = argparse.ArgumentParser(description='Test SAS Parser and Converter')
+    """Main test function with enhanced error handling."""
+    parser = argparse.ArgumentParser(description='Test SAS Parser')
     parser.add_argument('--input', default='./mock_data', help='Input directory with SAS files')
     parser.add_argument('--output', default='./mock_output', help='Output directory for Python files')
     parser.add_argument('--clean', action='store_true', help='Clean output directory before running')
@@ -367,27 +312,103 @@ def main():
     # Setup logging
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    logger = logging.getLogger(__name__)
 
     try:
-        if args.clean and os.path.exists(args.output):
-            print(f"\nCleaned output directory: {args.output}")
-            for file in glob.glob(os.path.join(args.output, "*")):
-                os.remove(file)
+        if args.clean:
+            clean_output_directory(args.output)
+            cleanup_chromadb()
 
-        # Run end-to-end test
-        results = test_end_to_end_conversion(args.input, args.output)
-        
-        print("\nTest Summary:")
-        print(f"Files processed: {results['files_processed']}")
-        print(f"Components found: {results['components_found']}")
-        print(f"Embeddings generated: {results['embeddings_generated']}")
-        print(f"Python files created: {results['python_files_created']}")
+        logger.info("Starting parser test...")
+        test_parser()
 
+        logger.info("Starting template converter test...")
+        if not test_template_converter():
+            logger.error("Template converter test failed")
+            return
+
+        # Create minimal templates for file conversion
+        minimal_templates = {
+            'proc_means': {
+                'template': """
+                # Calculate descriptive statistics for ${dataset}
+                stats_df = ${dataset}_df.describe()
+                print('\nDescriptive Statistics:')
+                print(stats_df)
+                """
+            },
+            'proc_freq': {
+                'template': """
+                # Frequency analysis
+                freq_table = pd.crosstab(
+                    ${dataset}_df['${var}'],
+                    margins=True
+                )
+                print('\nFrequency Table:')
+                print(freq_table)
+                """
+            },
+            'data_step': {
+                'template': """
+                # Create new dataset ${output_dataset}
+                ${output_dataset}_df = pd.DataFrame()
+                """
+            },
+            'proc_sql': {
+                'template': """
+                # SQL operation
+                result = pd.read_sql("${query}", connection)
+                """
+            }
+        }
+
+        # Create a temporary YAML file with minimal templates
+        with open('minimal_templates.yaml', 'w') as f:
+            yaml.dump(minimal_templates, f)
+
+        # Convert SAS files
+        if os.path.exists(args.input):
+            converter = SASPythonConverterTemplate(template_file='minimal_templates.yaml')
+            sas_files = glob.glob(os.path.join(args.input, "*.sas"))
+            
+            if not sas_files:
+                logger.warning(f"No SAS files found in {args.input}")
+                return
+                
+            os.makedirs(args.output, exist_ok=True)
+            
+            success_count = 0
+            error_count = 0
+            
+            for sas_file in sas_files:
+                output_file = os.path.join(
+                    args.output, 
+                    os.path.splitext(os.path.basename(sas_file))[0] + '.py'
+                )
+                
+                try:
+                    logger.info(f"Converting {sas_file}")
+                    converter.convert_file(sas_file, output_file)
+                    success_count += 1
+                    logger.info(f"Successfully converted to {output_file}")
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Failed to convert {sas_file}: {str(e)}")
+                    
+            logger.info(f"\nConversion complete:")
+            logger.info(f"Successfully converted: {success_count}")
+            logger.info(f"Failed conversions: {error_count}")
+            logger.info(f"Output directory: {args.output}")
+            
     except Exception as e:
-        logging.error(f"Critical error: {str(e)}", exc_info=True)
+        logger.error(f"Critical error: {str(e)}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Cleanup
+        if os.path.exists('minimal_templates.yaml'):
+            os.remove('minimal_templates.yaml')
 
 class TestSASPythonConverter(unittest.TestCase):
     def setUp(self):
