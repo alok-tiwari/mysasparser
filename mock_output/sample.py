@@ -52,7 +52,8 @@ def process_data(input_ds, output_ds, date_var, filter_condition):
     """
     pass
     # End of loop
-
+# TODO: Convert PROC SQL:
+# proc sql noprint;
 # TODO: Convert PROC_SQL:
 # proc sql noprint;
 # TODO: Convert DATA step - no dataset name found:
@@ -70,7 +71,8 @@ run;
 daily_summary_df = pd.DataFrame()
 # TODO: Convert DATA:
 # data STAGE.daily_summary;
-
+# TODO: Convert PROC SQL:
+# proc sql;
 # TODO: Convert PROC_SQL:
 # proc sql;
 # Calculate descriptive statistics

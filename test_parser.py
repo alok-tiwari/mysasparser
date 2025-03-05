@@ -309,7 +309,9 @@ def clean_output_directory(output_dir: str):
     import shutil
     try:
         if os.path.exists(output_dir):
+            # Remove the entire directory and its contents
             shutil.rmtree(output_dir)
+        # Create the output directory
         os.makedirs(output_dir)
         print(f"\nCleaned output directory: {output_dir}")
     except Exception as e:
@@ -371,10 +373,8 @@ def main():
     )
 
     try:
-        if args.clean and os.path.exists(args.output):
-            print(f"\nCleaned output directory: {args.output}")
-            for file in glob.glob(os.path.join(args.output, "*")):
-                os.remove(file)
+        if args.clean:
+            clean_output_directory(args.output)
 
         # Run end-to-end test
         results = test_end_to_end_conversion(args.input, args.output)

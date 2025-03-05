@@ -90,3 +90,96 @@ The converter also includes helper methods for:
 - Error handling and fallback mechanisms
 
 This comprehensive approach ensures that most common SAS components can be converted to equivalent Python code, with fallback mechanisms for more complex or unusual patterns.
+
+
+
+
+# SAS to Python Converter
+
+This tool converts SAS code to Python, focusing on data analysis workflows. It uses a combination of pattern matching and vector embeddings to translate SAS constructs to their Python equivalents.
+
+## Features
+
+- Converts SAS DATA steps to pandas operations
+- Translates common SAS PROCs to Python equivalents:
+  - PROC MEANS → pandas.DataFrame.describe()
+  - PROC TTEST → scipy.stats.ttest_1samp()
+  - PROC UNIVARIATE → scipy.stats and pandas descriptive statistics
+  - PROC SGPLOT → matplotlib/seaborn visualizations
+  - PROC GCHART → matplotlib bar/pie charts
+  - PROC SQL → pandas operations
+  - PROC SORT → pandas.DataFrame.sort_values()
+  - PROC FORMAT → custom formatting functions
+- Handles SAS macro variables and functions
+- Converts SAS ODS statements to matplotlib/pandas output settings
+- Processes SAS libraries and datasets
+- Cleans variable names to ensure Python compatibility
+
+## Installation
+
+```bash
+git clone https://github.com/yourusername/sas-python-converter.git
+cd sas-python-converter
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Command Line Interface
+
+```bash
+python test_parser.py --input ./path/to/sas/files --output ./output/directory --clean --debug
+```
+
+Options:
+- `--input`: Directory containing SAS files or path to a single SAS file
+- `--output`: Directory where converted Python files will be saved
+- `--clean`: Remove existing output directory before conversion
+- `--debug`: Enable debug logging
+
+### As a Library
+
+```python
+from sas_parser import SASParser
+from sas_python_converter import SASPythonConverter
+
+# Initialize parser and converter
+parser = SASParser()
+converter = SASPythonConverter(output_directory="./python_output")
+
+# Parse SAS file
+components = parser.parse_file("path/to/sas_file.sas")
+
+# Convert to Python
+python_code = converter.convert_to_python(components)
+
+# Save to file
+with open("output.py", "w") as f:
+    f.write(python_code)
+```
+
+## Recent Improvements
+
+- Added support for PROC SGPLOT conversion to matplotlib/seaborn
+- Improved handling of SAS macro functions like %scan and %eval
+- Enhanced ODS GRAPHICS conversion to matplotlib settings
+- Better handling of variable names with invalid characters
+- Fixed syntax errors in generated Python code
+- Improved conversion of DATA step operations
+- Enhanced error handling and reporting
+- Added support for SAS macro control structures (%do %while, etc.)
+
+## Limitations
+
+- Complex SAS macros may require manual adjustment after conversion
+- Custom SAS formats may not convert perfectly
+- Some specialized SAS procedures may not have direct Python equivalents
+- SAS-specific statistical methods might need additional Python libraries
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

@@ -9,7 +9,7 @@ import re
 
 # For ChromaDB testing
 from vector_store import VectorStore
-from sas_parser import SASComponent, SASParser
+from sas_parser import SASComponent, SASParser, SQLStatement
 from embedding_generator import EmbeddingGenerator
 
 # Configure logging
@@ -22,27 +22,28 @@ class SASPythonConverter:
     and using embeddings for translation guidance.
     """
     
-    def __init__(
-        self, 
-        vector_store=None, 
-        output_directory: str = "python_output",
-        embedding_generator=None
-    ):
-        """Initialize the converter."""
-        self.vector_store = vector_store
-        self.output_directory = output_directory
+    def __init__(self, output_directory: str = "python_output", vector_store: Optional[VectorStore] = None, 
+                 embedding_generator: Optional[EmbeddingGenerator] = None, input_directory: str = None):
+        """
+        Initialize the SAS to Python converter.
         
-        # Initialize embedding generator if not provided
-        if embedding_generator is None:
-            self.embedding_generator = EmbeddingGenerator(embedding_dim=4096)
-        else:
-            self.embedding_generator = embedding_generator
+        Args:
+            output_directory: Directory to write converted Python files
+            vector_store: Vector store for embeddings
+            embedding_generator: Embedding generator
+            input_directory: Input directory for SAS files (used for relative paths)
+        """
+        self.output_directory = output_directory
+        self.vector_store = vector_store
+        self.embedding_generator = embedding_generator
+        self.input_directory = input_directory
+        self.helper_functions = set()
+        self.macro_variables = {}
         
         # Create output directory if it doesn't exist
         os.makedirs(output_directory, exist_ok=True)
         
         # Initialize state tracking
-        self.macro_variables = {}
         self.libname_refs = {}
         self.format_functions = set()
         
@@ -257,13 +258,13 @@ class SASPythonConverter:
                     python_code.append(self._convert_proc(component))
                 
                 elif component.type == "PROC_SQL":
-                    python_code.append(self._convert_proc_sql(component))
+                    python_code.append(self._convert_proc_sql_enhanced(component))
                 
                 elif component.type == "MACRO":
                     python_code.append(self._convert_macro(component))
                 
                 elif component.type == "MACRO_CALL":
-                    python_code.append(self._convert_macro_call(component))
+                    python_code.append(self._convert_macro_call_enhanced(component))
                 
                 elif component.type == "TITLE" or component.type == "FOOTNOTE":
                     python_code.append(self._convert_title(component))
@@ -287,7 +288,7 @@ class SASPythonConverter:
                 if component.content and '%' in component.content:
                     # Look for macro calls in the content
                     for line in component.content.split('\n'):
-                        if line.strip().startswith('%analyze_segment'):
+                        if '%analyze_segment' in line:
                             # Convert this specific macro call
                             macro_call = self._convert_macro_call_statement(line.strip())
                             python_code.append(macro_call)
@@ -329,11 +330,12 @@ class SASPythonConverter:
                 'DATA': self._convert_data,
                 'LIBNAME': self._convert_libname,
                 'MACRO': self._convert_macro,
+                'MACRO_CALL': self._convert_macro_call_enhanced,  # Use enhanced macro call converter
                 '%LET': self._convert_let_direct,
                 '%IF': self._convert_if,
                 '%DO': self._convert_do,
                 '%PUT': self._convert_put,
-                'PROC_SQL': self._convert_proc_sql,
+                'PROC_SQL': self._convert_proc_sql_enhanced,  # Use enhanced SQL converter
                 'ODS': self._convert_ods,
                 'TITLE': self._convert_title,
                 'FOOTNOTE': self._convert_title,
@@ -376,14 +378,15 @@ class SASPythonConverter:
             elif proc_name == 'report':
                 return self._convert_proc_report(component)
             elif proc_name == 'format':
-                # Improved format conversion
                 return self._convert_proc_format(component)
             elif proc_name == 'sort':
                 return self._convert_proc_sort(component)
             elif proc_name == 'gchart':
                 return self._convert_proc_gchart(component)
             elif proc_name == 'sql':
-                return self._convert_proc_sql(component)
+                return self._convert_proc_sql_enhanced(component)  # Use enhanced SQL converter
+            elif proc_name == 'sgplot':
+                return self._convert_proc_sgplot(component)
             
             # If no specific converter, create a function stub
             return f"""# TODO: Convert PROC {proc_name}
@@ -499,25 +502,28 @@ print({dataset}.head(20))"""
             return f"# TODO: Convert PROC report:\n{component.content}"
 
     def _convert_sas_reference(self, ref: str) -> str:
-        """Convert SAS references like &var and dataset.name to Python variables."""
-        if not ref:
-            return ref
-        
+        """Convert SAS references (dataset names, macro variables) to Python."""
         # Handle macro variables
-        if ref.startswith('&'):
-            var_name = ref[1:]
-            return var_name
+        if '&' in ref:
+            # Replace &var with var
+            ref = re.sub(r'&(\w+)\.?', r'\1', ref)
         
         # Handle dataset references
-        if '.' in ref:
+        if '.' in ref and not ref.startswith("'") and not ref.startswith('"'):
             lib, name = ref.split('.')
-            if lib.upper() == 'WORK':
+            if lib.lower() == 'sashelp':
                 return f"{name.lower()}_df"
             else:
                 return f"{name.lower()}_df"
         
-        # Handle simple dataset names
-        return f"{ref.lower()}_df"
+        # Handle special references
+        if ref.lower() == '_null_':
+            return "_null__df"
+        
+        # Clean the reference name
+        ref = self._clean_variable_name(ref)
+        
+        return ref
 
     def _convert_data(self, component: SASComponent) -> str:
         """Convert DATA steps to Python DataFrame operations."""
@@ -697,99 +703,146 @@ print({dataset}.head(20))"""
             return f"# TODO: Convert MACRO:\n{component.content}"
 
     def _convert_ods(self, component: SASComponent) -> str:
-        """Convert ODS statements to matplotlib/pandas output settings."""
+        """Convert ODS statements to Python equivalents."""
         try:
-            content = component.content.strip().lower()
+            content = component.content.lower()
             
-            if 'graphics on' in content:
-                return "# Enable matplotlib for graphics\nplt.ion()"
+            if content.startswith('graphics'):
+                return self._convert_ods_graphics(component)
             
-            if 'graphics off' in content:
-                return "# Disable matplotlib for graphics\nplt.ioff()"
-            
-            if 'html' in content and 'close' not in content:
-                path_match = re.search(r'path\s*=\s*["\']?([^"\'\s]+)["\']?', component.content, re.IGNORECASE)
-                body_match = re.search(r'body\s*=\s*["\']?([^"\'\s]+)["\']?', component.content, re.IGNORECASE)
-                
-                path = path_match.group(1) if path_match else '"./output"'
-                file = body_match.group(1) if body_match else 'output.html'
-                
-                # Fix path string formatting
-                if not (path.startswith('"') or path.startswith("'")):
-                    path = f'"{path}"'
-                
-                return f"""# Set up HTML output
-output_path = Path({path})
-output_file = output_path / {repr(file)}
+            if 'html' in content and 'path=' in content:
+                # Extract path
+                path_match = re.search(r'path\s*=\s*[\'"]?([^\'"]+)[\'"]?', content, re.IGNORECASE)
+                if path_match:
+                    path = path_match.group(1)
+                    return f"""# Set up HTML output
+output_path = Path("{path}")
 output_path.mkdir(exist_ok=True, parents=True)"""
             
-            if 'html close' in content:
-                return "# Close HTML output\nplt.close('all')"
+            if 'html' in content and 'close' in content:
+                return """# Close HTML output
+plt.close('all')"""
             
-            return f"# TODO: Convert ODS statement:\n# {component.content.strip()}"
+            return f"# TODO: Convert ODS:\n# {component.content.strip()}"
             
         except Exception as e:
             logger.warning(f"Error converting ODS: {str(e)}")
-            return f"# TODO: Convert ODS statement:\n# {component.content.strip()}"
+            return f"# TODO: Convert ODS:\n# {component.content.strip()}"
+
+    def _convert_ods_graphics(self, component: SASComponent) -> str:
+        """Convert ODS GRAPHICS statements to matplotlib settings."""
+        try:
+            content = component.content.lower()
+            
+            if 'on' in content:
+                return """# Enable matplotlib for graphics
+plt.ion()"""
+            elif 'off' in content:
+                return """# Disable matplotlib for graphics
+plt.ioff()"""
+            
+            # Extract height and width if present
+            height_match = re.search(r'height\s*=\s*(\d+)', content)
+            width_match = re.search(r'width\s*=\s*(\d+)', content)
+            
+            height = height_match.group(1) if height_match else "6"
+            width = width_match.group(1) if width_match else "8"
+            
+            return f"""# Set matplotlib figure size
+plt.rcParams['figure.figsize'] = ({width}, {height})"""
+            
+        except Exception as e:
+            logger.warning(f"Error converting ODS GRAPHICS: {str(e)}")
+            return f"# TODO: Convert ODS GRAPHICS:\n# {component.content.strip()}"
 
     def _convert_proc_sql(self, component: SASComponent) -> str:
         """Convert PROC SQL to pandas operations."""
         try:
-            sql_content = component.content
+            content = component.content
             
-            # Extract SQL statements
-            sql_statements = re.findall(r'(?:select|create|insert|update|delete).*?;', 
-                                      sql_content, 
-                                      re.IGNORECASE | re.DOTALL)
+            # Extract CREATE TABLE statements
+            create_table_matches = re.findall(r'create\s+table\s+(\S+)\s+as\s+select\s+(.*?)\s+from\s+(\S+)(?:\s+where\s+(.*?))?(?:\s+group\s+by\s+(.*?))?(?:\s+order\s+by\s+(.*?))?;', 
+                                             content, re.IGNORECASE | re.DOTALL)
             
-            python_code = []
-            for stmt in sql_statements:
-                if re.match(r'\s*select', stmt, re.IGNORECASE):
-                    python_code.append(self._convert_sql_select(stmt))
+            if create_table_matches:
+                sql_code = []
+                for match in create_table_matches:
+                    output_table = self._convert_sas_reference(match[0])
+                    columns = match[1].strip()
+                    input_table = self._convert_sas_reference(match[2])
+                    where_clause = match[3].strip() if len(match) > 3 and match[3] else None
+                    group_by = match[4].strip() if len(match) > 4 and match[4] else None
+                    order_by = match[5].strip() if len(match) > 5 and match[5] else None
+                    
+                    # Start with the input table
+                    code = [f"{output_table} = {input_table}.copy()"]
+                    
+                    # Handle column selection
+                    if columns != '*':
+                        cols = [c.strip() for c in columns.split(',')]
+                        code.append(f"{output_table} = {output_table}[[{', '.join(repr(c) for c in cols)}]]")
+                    
+                    # Handle WHERE clause
+                    if where_clause:
+                        py_condition = self._convert_sas_condition(where_clause)
+                        code.append(f"{output_table} = {output_table}[{py_condition}]")
+                    
+                    # Handle GROUP BY
+                    if group_by:
+                        group_cols = [c.strip() for c in group_by.split(',')]
+                        code.append(f"{output_table} = {output_table}.groupby([{', '.join(repr(c) for c in group_cols)}]).agg({{'*': 'count'}})")
+                    
+                    # Handle ORDER BY
+                    if order_by:
+                        order_cols = []
+                        ascending = []
+                        for col in order_by.split(','):
+                            col = col.strip()
+                            if col.lower().endswith(' desc'):
+                                order_cols.append(col[:-5].strip())
+                                ascending.append(False)
+                            else:
+                                order_cols.append(col)
+                                ascending.append(True)
+                        
+                        code.append(f"{output_table} = {output_table}.sort_values(by=[{', '.join(repr(c) for c in order_cols)}], ascending={ascending})")
+                    
+                    sql_code.extend(code)
                 
-            return '\n'.join(python_code)
+                return '\n'.join(sql_code)
+            
+            # If no CREATE TABLE statements found, return a TODO comment
+            return f"# TODO: Convert PROC SQL:\n# {content.strip()}"
             
         except Exception as e:
-            raise ValueError(f"Error converting PROC SQL: {str(e)}")
+            logger.warning(f"Error converting PROC SQL: {str(e)}")
+            return f"# TODO: Convert PROC SQL:\n# {component.content.strip()}"
 
-    def _convert_format(self, component: SASComponent) -> str:
-        """Convert FORMAT/INFORMAT statements to Python functions."""
-        try:
-            content = component.content.strip()
-            format_match = re.search(r'value\s+(\w+)\s+(.*?);', content, re.IGNORECASE | re.DOTALL)
-            if not format_match:
-                return f"# TODO: Convert format: {content}"
+    def _convert_format(self, format_str: str) -> str:
+        """Convert SAS format to Python format string."""
+        # Handle common SAS formats
+        if re.match(r'(\$?)\w+(\d+)\.(\d+)', format_str):
+            # Extract width and decimal places
+            match = re.match(r'(\$?)(\w+)(\d+)\.(\d+)', format_str)
+            is_char = match.group(1) == '$'
+            width = int(match.group(3))
+            decimals = int(match.group(4))
             
-            format_name = format_match.group(1)
-            format_def = format_match.group(2)
-            
-            # Parse format definition
-            code_lines = [
-                f"def format_{format_name.lower()}(value):",
-                "    \"\"\"Format function generated from SAS format\"\"\"",
-                "    try:",
-            ]
-            
-            # Add format conditions
-            for line in format_def.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                value_match = re.search(r'([^=]+)=\s*["\']?(.*?)["\']?\s*$', line)
-                if value_match:
-                    cond, result = value_match.groups()
-                    code_lines.append(f"        if value {cond.strip()}: return {repr(result.strip())}")
-                
-            code_lines.extend([
-                "    except Exception:",
-                "        return str(value)",
-                "    return str(value)"
-            ])
-            
-            return '\n'.join(code_lines)
-            
-        except Exception as e:
-            raise ValueError(f"Error converting FORMAT: {str(e)}")
+            if is_char:
+                return f"'{{:<{width}}}'  # {format_str}"
+            else:
+                return f"'{{:{width}.{decimals}f}}'  # {format_str}"
+        
+        # Handle date formats
+        if format_str.lower() in ('date9.', 'mmddyy10.', 'yymmdd10.'):
+            return f"'%Y-%m-%d'  # {format_str}"
+        
+        # Handle time formats
+        if format_str.lower() in ('time8.', 'hhmm8.'):
+            return f"'%H:%M:%S'  # {format_str}"
+        
+        # Default case
+        return f"'{{}}' # Unknown format: {format_str}"
 
     def _convert_proc_print(self, component: SASComponent) -> str:
         """Convert PROC PRINT to pandas display."""
@@ -997,17 +1050,39 @@ def format_proc():
             raise ValueError(f"Error converting FILENAME: {str(e)}")
 
     def _convert_options(self, component: SASComponent) -> str:
-        """Convert SAS options to Python settings."""
+        """Convert SAS options to Python equivalents."""
         try:
-            content = component.content.strip()
-            if content.lower().startswith('goptions'):
-                return self._convert_graphics_options(content)
+            content = component.content.lower()
             
-            # Handle general options
-            return f"# SAS options: {content}"
+            options = []
+            
+            # Handle common options
+            if 'nocenter' in content:
+                options.append("# Set pandas display options to not center output")
+                options.append("pd.set_option('display.width', None)")
+            
+            if 'linesize=' in content:
+                linesize_match = re.search(r'linesize\s*=\s*(\d+)', content)
+                if linesize_match:
+                    linesize = linesize_match.group(1)
+                    options.append(f"# Set display width to {linesize}")
+                    options.append(f"pd.set_option('display.width', {linesize})")
+            
+            if 'pagesize=' in content:
+                pagesize_match = re.search(r'pagesize\s*=\s*(\d+)', content)
+                if pagesize_match:
+                    pagesize = pagesize_match.group(1)
+                    options.append(f"# Set display max rows to {pagesize}")
+                    options.append(f"pd.set_option('display.max_rows', {pagesize})")
+            
+            if options:
+                return '\n'.join(options)
+            
+            return f"# TODO: Convert OPTIONS:\n# {component.content.strip()}"
             
         except Exception as e:
-            raise ValueError(f"Error converting OPTIONS: {str(e)}")
+            logger.warning(f"Error converting OPTIONS: {str(e)}")
+            return f"# TODO: Convert OPTIONS:\n# {component.content.strip()}"
 
     def _convert_graphics_options(self, content: str) -> str:
         """Convert GOPTIONS to matplotlib settings."""
@@ -1265,304 +1340,148 @@ def format_proc():
                 if output_file:
                     if isinstance(output_file, dict):
                         # If convert_file returns a dictionary, extract the file path
-                        converted_files.extend(output_file.keys())
+                        converted_files.append(output_file.get('path', ''))
                     else:
-                        # If convert_file returns a string path, use that directly
                         converted_files.append(output_file)
             except Exception as e:
                 logger.error(f"Error converting {sas_file}: {str(e)}")
-                    
+        
         return converted_files
-        
-    def convert_file(self, file_path: str) -> str:
-        """Convert a SAS file to Python."""
-        logger.info(f"Converting {file_path}")
-        
-        # Parse the SAS file
-        components = self.parse_sas_file(file_path)
-        if not components:
-            logger.warning(f"No components found in {file_path}")
-            return None
-        
-        logger.info(f"Found {len(components)} components to convert")
-        
-        # Convert components to Python
-        python_code = self.convert_to_python(components, file_path)
-        
-        # Write to output file
-        output_file = os.path.join(
-            self.output_directory,
-            os.path.splitext(os.path.basename(file_path))[0] + '.py'
-        )
-        
-        with open(output_file, 'w') as f:
-            f.write(python_code)
-        
-        logger.info(f"✓ Successfully converted to {output_file}")
-        
-        # Track this file as converted
-        self.converted_files[file_path] = output_file
-        
-        return output_file
 
-    def _convert_proc_sort(self, component: SASComponent) -> str:
-        """Convert PROC SORT to pandas sort_values."""
+    def convert_file(self, input_file: str) -> str:
+        """
+        Convert a SAS file to Python.
+        
+        Args:
+            input_file: Path to SAS file
+            
+        Returns:
+            Path to converted Python file
+        """
         try:
-            # Extract dataset and options
-            data_match = re.search(r'data\s*=\s*(\w+\.?\w*)', component.content, re.IGNORECASE)
-            by_match = re.search(r'by\s+(.*?);', component.content, re.IGNORECASE)
-            out_match = re.search(r'out\s*=\s*(\w+\.?\w*)', component.content, re.IGNORECASE)
+            # Parse the SAS file
+            parser = SASParser()
+            components = parser.parse_file(input_file)
             
-            if not data_match or not by_match:
-                raise ValueError("Missing required DATA= or BY statement")
+            if not components:
+                logger.warning(f"No components found in {input_file}")
+                return None
             
-            dataset = data_match.group(1).replace('.', '_')
-            by_vars = by_match.group(1).split()
-            output_ds = out_match.group(1).replace('.', '_') if out_match else dataset
+            # Convert to Python
+            python_code = self.convert_to_python(components, input_file)
             
-            # Handle descending sort
-            sort_cols = []
-            ascending = []
-            for var in by_vars:
-                if var.upper().startswith('DESCENDING'):
-                    var = var.split()[1]  # Get actual variable name
-                    sort_cols.append(var)
-                    ascending.append(False)
-                else:
-                    sort_cols.append(var)
-                    ascending.append(True)
+            # Create output file path - just use the filename without directory structure
+            input_path = Path(input_file)
+            output_filename = input_path.name.replace('.sas', '.py')
+            output_path = Path(self.output_directory) / output_filename
             
-            code_lines = [
-                f"# Sort {dataset} by {', '.join(by_vars)}",
-                f"{output_ds}_df = {dataset}_df.sort_values(",
-                f"    by={sort_cols},",
-                f"    ascending={ascending},",
-                f"    ignore_index=True",
-                ")"
-            ]
+            # Create directory if it doesn't exist
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            return '\n'.join(code_lines)
+            # Write Python code to file
+            with open(output_path, 'w') as f:
+                f.write(python_code)
+            
+            logger.info(f"Converted {input_file} to {output_path}")
+            return str(output_path)
             
         except Exception as e:
-            raise ValueError(f"Error converting PROC SORT: {str(e)}")
+            logger.error(f"Error converting {input_file}: {str(e)}")
+            raise
 
-    def _convert_include(self, component: SASComponent) -> str:
-        """Convert %INCLUDE statements to Python imports."""
-        try:
-            # Extract file path
-            path_match = re.search(r'%include\s+["\']([^"\']+)["\']', component.content, re.IGNORECASE)
-            if not path_match:
-                raise ValueError("Invalid %INCLUDE syntax")
-            
-            include_path = path_match.group(1)
-            module_name = os.path.splitext(os.path.basename(include_path))[0]
-            
-            # Return import statement
-            return f"from {module_name} import *  # Converted from %INCLUDE {include_path}"
-            
-        except Exception as e:
-            raise ValueError(f"Error converting %INCLUDE: {str(e)}")
+    def _get_helper_functions(self) -> str:
+        """Get helper functions needed for the converted code."""
+        helper_code = []
+        
+        # Add load_sashelp_dataset helper function
+        if 'load_sashelp_dataset' in self.helper_functions:
+            helper_code.extend([
+                "def load_sashelp_dataset(name: str) -> pd.DataFrame:",
+                "    \"\"\"Load a dataset from sashelp library.\"\"\"",
+                "    try:",
+                "        return pd.read_csv(f'sashelp_{name.lower()}.csv')",
+                "    except Exception as e:",
+                "        print(f'Error loading sashelp.{name}: {e}')",
+                "        return pd.DataFrame()"
+            ])
+        
+        # Add eval_expr helper function
+        if 'eval_expr' in self.helper_functions:
+            helper_code.extend([
+                "",
+                "def eval_expr(expr: str):",
+                "    \"\"\"Evaluate a SAS expression.\"\"\"",
+                "    try:",
+                "        return eval(expr)",
+                "    except Exception as e:",
+                "        print(f'Error evaluating expression {expr}: {e}')",
+                "        return None"
+            ])
+        
+        # Add other helper functions as needed
+        
+        return '\n'.join(helper_code)
 
     def _convert_proc_gchart(self, component: SASComponent) -> str:
-        """Convert PROC GCHART to matplotlib plotting."""
+        """Convert PROC GCHART to matplotlib charts."""
         try:
             content = component.content
-            data_match = re.search(r'data\s*=\s*(\w+\.?\w*)', content, re.IGNORECASE)
+            data_match = re.search(r'data\s*=\s*(\S+)', content, re.IGNORECASE)
             
             if not data_match:
                 return "# TODO: Convert PROC GCHART - no dataset specified"
             
             dataset = self._convert_sas_reference(data_match.group(1))
             
-            # Check for chart type
+            # Check for chart types
             vbar_match = re.search(r'vbar\s+(\w+)', content, re.IGNORECASE)
             hbar_match = re.search(r'hbar\s+(\w+)', content, re.IGNORECASE)
             pie_match = re.search(r'pie\s+(\w+)', content, re.IGNORECASE)
+            
+            # Extract title if present
+            title_match = re.search(r'title\s*=\s*[\'"]([^\'"]+)[\'"]', content, re.IGNORECASE)
+            title = f"'{title_match.group(1)}'" if title_match else "''"
             
             if vbar_match:
                 x_var = vbar_match.group(1)
                 return f"""# Create vertical bar chart
 plt.figure(figsize=(10, 6))
-{dataset}.plot(kind='bar', x='{x_var}', y='amount', title='Sales by {x_var.title()}')
+{dataset}.plot(kind='bar', x='{x_var}')
+plt.title('Distribution by {x_var.title()}')
 plt.xlabel('{x_var.title()}')
 plt.ylabel('Amount')
-plt.tight_layout()
-plt.savefig('vbar_{x_var}.png')"""
+plt.tight_layout()"""
             
             elif hbar_match:
                 x_var = hbar_match.group(1)
                 return f"""# Create horizontal bar chart
 plt.figure(figsize=(10, 6))
-{dataset}.plot(kind='barh', x='{x_var}', y='amount', title='Sales by {x_var.title()}')
+{dataset}.plot(kind='barh', x='{x_var}')
+plt.title('Distribution by {x_var.title()}')
 plt.xlabel('Amount')
 plt.ylabel('{x_var.title()}')
-plt.tight_layout()
-plt.savefig('hbar_{x_var}.png')"""
+plt.tight_layout()"""
             
             elif pie_match:
                 slice_var = pie_match.group(1)
                 return f"""# Create pie chart
 plt.figure(figsize=(10, 6))
-{dataset}.plot(kind='pie', y='amount', labels={dataset}['{slice_var}'], autopct='%1.1f%%')
+{dataset}['{slice_var}'].value_counts().plot(kind='pie', autopct='%1.1f%%')
 plt.title('Sales Distribution by {slice_var.title()}')
 plt.ylabel('')
-plt.tight_layout()
-plt.savefig('pie_{slice_var}.png')"""
+plt.tight_layout()"""
             
-            return f"""# TODO: Convert PROC GCHART - chart type not recognized
+            return f"""# TODO: Convert PROC GCHART - plot type not recognized
 # Original SAS code:
 # {content.strip()}
-def plot_chart(data_df):
-    \"\"\"Create chart from data\"\"\"
-    plt.figure(figsize=(10, 6))
-    # Add appropriate plotting code here
-    plt.tight_layout()
-    plt.savefig('chart.png')"""
+plt.figure(figsize=(10, 6))
+# Add appropriate plotting code here
+plt.title({title})
+plt.tight_layout()"""
             
         except Exception as e:
             logger.warning(f"Error converting PROC GCHART: {str(e)}")
             return f"# TODO: Convert PROC GCHART:\n# {component.content.strip()}"
-
-    def _convert_macro_call(self, component: SASComponent) -> str:
-        """Convert SAS macro calls to Python function calls."""
-        try:
-            content = component.content.strip()
-            
-            # Check if this is a macro call with parameters
-            macro_match = re.search(r'%(\w+)\s*\((.*)\);', content, re.IGNORECASE)
-            if macro_match:
-                macro_name = macro_match.group(1)
-                params_str = macro_match.group(2)
-                
-                # Parse parameters
-                params = {}
-                for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
-                    param_name = param[0]
-                    param_value = param[1].strip()
-                    # Convert SAS references to Python
-                    param_value = self._convert_sas_reference(param_value)
-                    params[param_name] = param_value
-                
-                # Generate Python function call
-                params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
-                return f"{macro_name}({params_code})"
-            
-            # Check if this is a simple macro call
-            simple_macro_match = re.search(r'%(\w+);', content, re.IGNORECASE)
-            if simple_macro_match:
-                macro_name = simple_macro_match.group(1)
-                return f"{macro_name}()"
-            
-            # If we can't parse it, return a TODO comment
-            return f"# TODO: Convert macro call: {content}"
-            
-        except Exception as e:
-            logger.warning(f"Error converting macro call: {str(e)}")
-            return f"# TODO: Convert macro call: {content}"
-
-    def _add_helper_function(self, function_name: str):
-        """Add helper function to the list of functions to include in output."""
-        if not hasattr(self, 'helper_functions'):
-            self.helper_functions = set()
-        
-        self.helper_functions.add(function_name)
-
-    def _get_helper_functions(self) -> str:
-        """Get all helper functions needed for the conversion."""
-        helper_code = []
-        
-        if hasattr(self, 'helper_functions'):
-            if 'scan' in self.helper_functions:
-                helper_code.append("""
-def scan(text, position, delimiter=' '):
-    \"\"\"Python equivalent of SAS %scan function\"\"\"
-    if isinstance(text, str):
-        parts = text.split(delimiter)
-        if isinstance(position, (int, float)) and 0 <= position-1 < len(parts):
-            return parts[position-1]
-    return ""
-""")
-            
-            if 'eval_expr' in self.helper_functions:
-                helper_code.append("""
-def eval_expr(expression):
-    \"\"\"Python equivalent of SAS %eval function\"\"\"
-    try:
-        return eval(expression)
-    except:
-        return expression
-""")
-        
-        return '\n'.join(helper_code)
-
-    def _convert_macro_do(self, component: SASComponent) -> str:
-        """Convert %DO statements to Python loops."""
-        try:
-            content = component.content.strip()
-            
-            # Handle %DO %WHILE
-            do_while_match = re.search(r'%do\s+%while\s*\(\s*(.+?)\s*\)', content, re.IGNORECASE)
-            if do_while_match:
-                condition = do_while_match.group(1)
-                # Convert condition to Python
-                condition = self._convert_macro_condition(condition)
-                return f"while {condition}:"
-            
-            # Handle %DO with counter
-            do_counter_match = re.search(r'%do\s+(\w+)\s*=\s*(\d+)\s+to\s+(\d+)', content, re.IGNORECASE)
-            if do_counter_match:
-                var = do_counter_match.group(1)
-                start = do_counter_match.group(2)
-                end = do_counter_match.group(3)
-                return f"for {var} in range({start}, {end}+1):"
-            
-            # Handle simple %DO
-            if content.lower().startswith('%do'):
-                return "# Start of DO block"
-            
-            return f"# TODO: Convert %DO: {content}"
-            
-        except Exception as e:
-            logger.warning(f"Error converting %DO: {str(e)}")
-            return f"# TODO: Convert %DO:\n# {content}"
-
-    def _convert_macro_end(self, component: SASComponent) -> str:
-        """Convert %END statements to Python."""
-        try:
-            # For %END, we just need to handle indentation in the calling code
-            return "# End of block"
-            
-        except Exception as e:
-            logger.warning(f"Error converting %END: {str(e)}")
-            return f"# TODO: Convert %END:\n# {component.content}"
-
-    def _convert_macro_call_statement(self, statement: str) -> str:
-        """Convert a SAS macro call statement to Python function call."""
-        try:
-            # Extract macro name and parameters
-            macro_match = re.search(r'%(\w+)\s*\((.*)\);', statement, re.IGNORECASE)
-            if not macro_match:
-                return f"# TODO: Convert macro call: {statement}"
-            
-            macro_name = macro_match.group(1)
-            params_str = macro_match.group(2)
-            
-            # Parse parameters
-            params = {}
-            for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
-                param_name = param[0]
-                param_value = param[1].strip()
-                # Convert SAS references to Python
-                param_value = self._convert_sas_reference(param_value)
-                params[param_name] = param_value
-            
-            # Generate Python function call
-            params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
-            return f"{macro_name}({params_code})"
-            
-        except Exception as e:
-            logger.warning(f"Error converting macro call statement: {str(e)}")
-            return f"# TODO: Convert macro call: {statement}"
 
     def _convert_macro_do_statement(self, statement: str) -> str:
         """Convert a %DO %WHILE statement to Python while loop."""
@@ -1579,5 +1498,418 @@ def eval_expr(expression):
         
         except Exception as e:
             logger.warning(f"Error converting %DO statement: {str(e)}")
-            logger.warning(f"Error converting %DO %WHILE statement: {str(e)}")
             return f"# TODO: Convert %DO %WHILE statement: {statement}"
+
+    def _clean_variable_name(self, var_name: str) -> str:
+        """Clean variable names by removing invalid characters."""
+        # Remove semicolons and other invalid characters
+        cleaned = re.sub(r'[;:,\s\(\)\[\]{}]', '_', var_name)
+        # Ensure the name is a valid Python identifier
+        if cleaned and not cleaned[0].isalpha() and cleaned[0] != '_':
+            cleaned = f"_{cleaned}"
+        return cleaned
+
+    def _convert_macro_call_statement(self, statement: str) -> str:
+        """Convert a macro call statement to Python function call."""
+        try:
+            # Extract macro name and parameters
+            macro_match = re.search(r'%(\w+)\s*\((.*)\);', statement, re.IGNORECASE)
+            if not macro_match:
+                return f"# TODO: Convert macro call: {statement}"
+            
+            macro_name = macro_match.group(1)
+            params_str = macro_match.group(2)
+            
+            # Parse parameters
+            params = {}
+            for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
+                param_name = param[0]
+                param_value = param[1].strip()
+                
+                # Convert SAS references to Python
+                if param_value.startswith('&'):
+                    # It's a macro variable reference
+                    param_value = param_value[1:]  # Remove the & prefix
+                elif param_value.upper() in ('YES', 'NO'):
+                    # Convert SAS boolean to Python
+                    param_value = 'True' if param_value.upper() == 'YES' else 'False'
+                elif '.' in param_value and not (param_value.startswith("'") or param_value.startswith('"')):
+                    # It's likely a dataset reference
+                    param_value = self._convert_sas_reference(param_value)
+                
+                params[param_name] = param_value
+            
+            # Generate Python function call
+            params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
+            return f"{macro_name}({params_code})"
+            
+        except Exception as e:
+            logger.warning(f"Error converting macro call statement: {str(e)}")
+            return f"# TODO: Convert macro call: {statement}"
+
+    def _convert_proc_sql_enhanced(self, component: SASComponent) -> str:
+        """Enhanced converter for PROC SQL with support for complex SQL statements."""
+        try:
+            content = component.content
+            
+            # Extract SQL statements
+            sql_statements = self._extract_sql_statements(content)
+            if not sql_statements:
+                return self._convert_proc_sql(component)  # Fall back to original converter
+            
+            python_code = ["# Convert PROC SQL to pandas operations"]
+            
+            for stmt in sql_statements:
+                if stmt.statement_type.upper() == 'CREATE TABLE':
+                    python_code.append(self._convert_sql_create_table(stmt))
+                elif stmt.statement_type.upper() == 'SELECT':
+                    python_code.append(self._convert_sql_select(stmt))
+                elif stmt.statement_type.upper() == 'INSERT':
+                    python_code.append(self._convert_sql_insert(stmt))
+                elif stmt.statement_type.upper() == 'UPDATE':
+                    python_code.append(self._convert_sql_update(stmt))
+                elif stmt.statement_type.upper() == 'DELETE':
+                    python_code.append(self._convert_sql_delete(stmt))
+                else:
+                    python_code.append(f"# TODO: Convert SQL {stmt.statement_type}:\n# {stmt.content}")
+            
+            return "\n".join(python_code)
+            
+        except Exception as e:
+            logger.warning(f"Error in enhanced SQL conversion: {str(e)}")
+            # Fall back to original converter
+            return self._convert_proc_sql(component)
+
+    def _extract_sql_statements(self, content: str) -> List[SQLStatement]:
+        """Extract individual SQL statements from PROC SQL content."""
+        from sas_parser import SQLStatement
+        
+        statements = []
+        # Split content by semicolons, but respect quoted strings
+        parts = []
+        current_part = []
+        in_quotes = False
+        quote_char = None
+        
+        for char in content:
+            if char in ["'", '"'] and (not in_quotes or quote_char == char):
+                in_quotes = not in_quotes
+                if in_quotes:
+                    quote_char = char
+                else:
+                    quote_char = None
+            
+            if char == ';' and not in_quotes:
+                current_part.append(char)
+                parts.append(''.join(current_part).strip())
+                current_part = []
+            else:
+                current_part.append(char)
+        
+        if current_part:
+            parts.append(''.join(current_part).strip())
+        
+        # Process each statement
+        for part in parts:
+            if not part or part == ';':
+                continue
+            
+            # Determine statement type
+            stmt_type = "UNKNOWN"
+            stmt_content = part
+            
+            # Check for CREATE TABLE
+            create_match = re.search(r'CREATE\s+TABLE\s+(\S+)', part, re.IGNORECASE)
+            if create_match:
+                stmt_type = "CREATE TABLE"
+                tables = [create_match.group(1)]
+                statements.append(SQLStatement(stmt_type, stmt_content, tables))
+                continue
+            
+            # Check for SELECT
+            select_match = re.search(r'SELECT\s+', part, re.IGNORECASE)
+            if select_match:
+                stmt_type = "SELECT"
+                # Extract tables from FROM clause
+                from_match = re.search(r'FROM\s+(.*?)(?:WHERE|GROUP|ORDER|HAVING|$)', part, re.IGNORECASE | re.DOTALL)
+                tables = []
+                if from_match:
+                    tables_str = from_match.group(1).strip()
+                    # Handle table joins
+                    if re.search(r'\bJOIN\b', tables_str, re.IGNORECASE):
+                        # Extract tables from JOIN clauses
+                        join_tables = re.findall(r'(?:FROM|JOIN)\s+(\w+\.?\w*)', part, re.IGNORECASE)
+                        tables.extend(join_tables)
+                    else:
+                        # Simple comma-separated tables
+                        tables.extend([t.strip() for t in tables_str.split(',')])
+            
+            statements.append(SQLStatement(stmt_type, stmt_content, tables))
+        
+        return statements
+
+    def _convert_sql_create_table(self, stmt: SQLStatement) -> str:
+        """Convert SQL CREATE TABLE statement to pandas code."""
+        content = stmt.content
+        tables = stmt.tables
+        
+        if not tables:
+            return f"# TODO: Convert SQL CREATE TABLE - no table name found\n# {content}"
+        
+        output_table = self._convert_sas_reference(tables[0])
+        
+        # Extract columns and data source
+        select_match = re.search(r'SELECT\s+(.*?)\s+FROM\s+(.*?)(?:WHERE|GROUP|ORDER|HAVING|;|$)', 
+                                content, re.IGNORECASE | re.DOTALL)
+        
+        if not select_match:
+            return f"# TODO: Convert SQL CREATE TABLE - complex statement\n# {content}"
+        
+        columns = select_match.group(1).strip()
+        source = select_match.group(2).strip()
+        source_table = self._convert_sas_reference(source)
+        
+        # Handle WHERE clause
+        where_match = re.search(r'WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
+        where_clause = ""
+        if where_match:
+            where_condition = where_match.group(1).strip()
+            where_clause = f"\n# Filter data\n{output_table} = {output_table}[{self._convert_sql_condition(where_condition)}]"
+        
+        # Handle GROUP BY
+        group_match = re.search(r'GROUP\s+BY\s+(.*?)(?:ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
+        group_clause = ""
+        if group_match:
+            group_cols = group_match.group(1).strip()
+            cols_list = []
+            for col in group_cols.split(','):
+                cols_list.append(f"'{col.strip()}'")
+            group_clause = f"\n# Group data\n{output_table} = {output_table}.groupby([{', '.join(cols_list)}])"
+            
+            # Check for aggregation functions in SELECT
+            if re.search(r'(SUM|AVG|MIN|MAX|COUNT)\s*\(', columns, re.IGNORECASE):
+                agg_dict = {}
+                for col_expr in columns.split(','):
+                    col_expr = col_expr.strip()
+                    agg_match = re.search(r'(SUM|AVG|MIN|MAX|COUNT)\s*\(\s*(\w+)\s*\)(?:\s+AS\s+(\w+))?', col_expr, re.IGNORECASE)
+                    if agg_match:
+                        func = agg_match.group(1).lower()
+                        col = agg_match.group(2)
+                        alias = agg_match.group(3) if agg_match.group(3) else f"{func}_{col}"
+                        
+                        # Map SAS aggregate functions to pandas
+                        func_map = {'sum': 'sum', 'avg': 'mean', 'min': 'min', 'max': 'max', 'count': 'count'}
+                        pandas_func = func_map.get(func, func)
+                        
+                        if col not in agg_dict:
+                            agg_dict[col] = []
+                        agg_dict[col].append(pandas_func)
+                
+                if agg_dict:
+                    agg_parts = []
+                    for col, funcs in agg_dict.items():
+                        func_parts = []
+                        for func in funcs:
+                            func_parts.append(f"'{func}'")
+                        agg_parts.append(f"'{col}': [{', '.join(func_parts)}]")
+                    agg_str = ", ".join(agg_parts)
+                    group_clause += f".agg({{{agg_str}}})"
+                else:
+                    group_clause += ".agg()"
+        
+        # Handle ORDER BY
+        order_match = re.search(r'ORDER\s+BY\s+(.*?)(?:;|$)', content, re.IGNORECASE | re.DOTALL)
+        order_clause = ""
+        if order_match:
+            order_cols = []
+            ascending = []
+            
+            for col_expr in order_match.group(1).split(','):
+                col_expr = col_expr.strip()
+                if re.search(r'\bDESC\b', col_expr, re.IGNORECASE):
+                    col = re.sub(r'\s+DESC\b', '', col_expr, flags=re.IGNORECASE).strip()
+                    order_cols.append(col)
+                    ascending.append(False)
+                else:
+                    col = re.sub(r'\s+ASC\b', '', col_expr, flags=re.IGNORECASE).strip()
+                    order_cols.append(col)
+                    ascending.append(True)
+            
+            order_cols_quoted = [f"'{col}'" for col in order_cols]
+            order_clause = f"\n# Sort data\n{output_table} = {output_table}.sort_values(by=[{', '.join(order_cols_quoted)}], ascending={ascending})"
+        
+        # Handle column selection
+        if columns.strip() == '*':
+            column_clause = f"{output_table} = {source_table}.copy()"
+        else:
+            # Parse column expressions
+            column_list = []
+            for col_expr in columns.split(','):
+                col_expr = col_expr.strip()
+                # Check for column aliases
+                alias_match = re.search(r'(.*?)\s+AS\s+(\w+)', col_expr, re.IGNORECASE)
+                if alias_match:
+                    expr = alias_match.group(1).strip()
+                    alias = alias_match.group(2)
+                    column_list.append((expr, alias))
+                else:
+                    column_list.append((col_expr, col_expr))
+            
+            # Generate column selection code
+            if all(expr == alias for expr, alias in column_list):
+                # Simple column selection
+                cols_quoted = [f"'{expr}'" for expr, _ in column_list]
+                column_clause = f"{output_table} = {source_table}[[{', '.join(cols_quoted)}]]"
+            else:
+                # Complex column expressions with aliases
+                column_clause = f"{output_table} = {source_table}.copy()\n"
+                for expr, alias in column_list:
+                    # Convert SAS expression to pandas
+                    pandas_expr = self._convert_sql_expression(expr)
+                    column_clause += f"{output_table}['{alias}'] = {pandas_expr}\n"
+        
+        return f"""# Create table {output_table} from SQL
+{column_clause}{where_clause}{group_clause}{order_clause}"""
+
+    def _convert_sql_select(self, stmt: SQLStatement) -> str:
+        """Convert SQL SELECT statement to pandas code."""
+        # Similar to CREATE TABLE but without creating a new DataFrame
+        content = stmt.content
+        tables = stmt.tables
+        
+        if not tables:
+            return f"# TODO: Convert SQL SELECT - no table found\n# {content}"
+        
+        source_table = self._convert_sas_reference(tables[0])
+        result_var = f"result_{source_table}"
+        
+        # Extract columns
+        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', content, re.IGNORECASE | re.DOTALL)
+        if not select_match:
+            return f"# TODO: Convert SQL SELECT - complex statement\n# {content}"
+        
+        columns = select_match.group(1).strip()
+        
+        # Handle WHERE clause
+        where_match = re.search(r'WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
+        where_clause = ""
+        if where_match:
+            where_condition = where_match.group(1).strip()
+            where_clause = f"\n# Filter data\n{result_var} = {result_var}[{self._convert_sql_condition(where_condition)}]"
+        
+        # Similar handling for GROUP BY and ORDER BY as in _convert_sql_create_table
+        
+        # Handle column selection
+        if columns.strip() == '*':
+            column_clause = f"{result_var} = {source_table}.copy()"
+        else:
+            # Create a list of quoted column names
+            cols_quoted = []
+            for col in columns.split(','):
+                cols_quoted.append(f"'{col.strip()}'")
+            
+            # Join the quoted column names
+            column_clause = f"{result_var} = {source_table}[[{', '.join(cols_quoted)}]]"
+        
+        return f"""# Execute SQL SELECT
+{column_clause}{where_clause}
+print({result_var}.head())"""
+
+    def _expand_macro_variables(self, content: str) -> str:
+        """Expand macro variables in a string."""
+        # Find all macro variable references
+        macro_refs = re.findall(r'&(\w+)\.?', content)
+        
+        # Replace each reference with its value
+        expanded = content
+        for var_name in macro_refs:
+            if var_name in self.macro_variables:
+                value = self.macro_variables[var_name]
+                # Replace &var and &var. with the value
+                expanded = re.sub(r'&' + var_name + r'\.?', value, expanded)
+        
+        return expanded
+
+    def _process_macro_definition(self, macro_component: SASComponent) -> None:
+        """Process a macro definition to extract parameters and default values."""
+        content = macro_component.content
+        name = macro_component.name
+        
+        # Extract macro parameters
+        param_match = re.search(r'%MACRO\s+' + re.escape(name) + r'\s*\((.*?)\)', content, re.IGNORECASE | re.DOTALL)
+        if not param_match:
+            return
+        
+        params_str = param_match.group(1).strip()
+        if not params_str:
+            return
+        
+        # Parse parameters and their default values
+        params = {}
+        for param in params_str.split(','):
+            param = param.strip()
+            if '=' in param:
+                param_name, default_value = param.split('=', 1)
+                params[param_name.strip()] = default_value.strip()
+            else:
+                params[param] = None
+        
+        # Store macro parameters in metadata
+        macro_component.metadata['parameters'] = params
+
+    def _convert_macro_call_enhanced(self, component: SASComponent) -> str:
+        """Enhanced converter for macro calls with parameter expansion."""
+        try:
+            content = component.content.strip()
+            
+            # Extract macro name and parameters
+            macro_match = re.search(r'%(\w+)\s*\((.*)\);', content, re.IGNORECASE)
+            if not macro_match:
+                return self._convert_macro_call(component)  # Fall back to original converter
+            
+            macro_name = macro_match.group(1)
+            params_str = macro_match.group(2)
+            
+            # Parse parameters
+            params = {}
+            param_values = []
+            
+            # Handle positional and named parameters
+            if '=' in params_str:
+                # Named parameters
+                for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
+                    param_name = param[0]
+                    param_value = param[1].strip()
+                    
+                    # Expand macro variables in parameter value
+                    param_value = self._expand_macro_variables(param_value)
+                    
+                    # Convert SAS references to Python
+                    param_value = self._convert_sas_reference(param_value)
+                    
+                    params[param_name] = param_value
+            else:
+                # Positional parameters
+                for param_value in params_str.split(','):
+                    param_value = param_value.strip()
+                    
+                    # Expand macro variables in parameter value
+                    param_value = self._expand_macro_variables(param_value)
+                    
+                    # Convert SAS references to Python
+                    param_value = self._convert_sas_reference(param_value)
+                    
+                    param_values.append(param_value)
+            
+            # Generate Python function call
+            if params:
+                params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
+                return f"{macro_name}({params_code})"
+            else:
+                params_code = ", ".join(param_values)
+                return f"{macro_name}({params_code})"
+            
+        except Exception as e:
+            logger.warning(f"Error in enhanced macro call conversion: {str(e)}")
+            # Fall back to original converter
+            return self._convert_macro_call(component)

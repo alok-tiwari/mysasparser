@@ -81,7 +81,8 @@ for col in data.select_dtypes(include=['number']).columns:
         print(f"  Significant at alpha=alpha;: {p_value < alpha;}")
 # TODO: Convert PROC:
 # proc ttest data=&data h0=0 alpha=&alpha;
-
+# TODO: Convert PROC SQL:
+# proc sql noprint;
 # TODO: Convert PROC_SQL:
 # proc sql noprint;
 def run_analysis():
@@ -93,11 +94,12 @@ def run_analysis():
 while segment ne:
 # TODO: Convert macro call: %analyze_segment(
     # End of loop
-# Enable matplotlib for graphics
-plt.ion()
+# TODO: Convert ODS:
+# %run_analysis;
+ 
+ods graphics on;
 # Set up HTML output
 output_path = Path("./output")
-output_file = output_path / 'analysis_report.html'
 output_path.mkdir(exist_ok=True, parents=True)
 # TODO: Convert ODS:
 # ods html path="./output"
@@ -115,7 +117,7 @@ plt.title('By Segment')
 plt.close('all')
 # TODO: Convert ODS:
 # ods html close;
-# Disable matplotlib for graphics
-plt.ioff()
+# TODO: Convert ODS:
+# ods graphics off;
 # TODO: Convert ODS:
 # ods graphics off;

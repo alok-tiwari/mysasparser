@@ -34,9 +34,10 @@ print(class;_df_stats)
 # TODO: Convert PROC:
 # PROC MEANS data=sashelp.class;
 # Create new DataFrame filtered
-filtered_df = pd.DataFrame()
+filtered = pd.DataFrame()
 # TODO: Convert DATA:
 # DATA filtered;
-
+# TODO: Convert PROC SQL:
+# PROC SQL;
 # TODO: Convert PROC_SQL:
 # PROC SQL;
