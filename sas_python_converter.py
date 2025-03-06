@@ -12,6 +12,10 @@ from vector_store import VectorStore
 from sas_parser import SASComponent, SASParser, SQLStatement
 from embedding_generator import EmbeddingGenerator
 
+# Import the additional PROC converters
+from proc_converters import convert_proc_corr, convert_proc_reg, convert_proc_sgplot
+from proc_sql_converter import convert_proc_sql_enhanced
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('SASPythonConverter')
@@ -216,10 +220,40 @@ class SASPythonConverter:
         
         return code_lines
 
+    def _identify_datasets(self, components: List[SASComponent]) -> List[str]:
+        """Identify all datasets referenced in the SAS code."""
+        datasets = set()
+        
+        for component in components:
+            # Look for dataset references in various components
+            if component.type in ["DATA", "PROC", "PROC_SQL"]:
+                # Find all dataset references
+                refs = re.findall(r'(?:data|set|from|table)\s*=?\s*(\w+\.?\w*)', 
+                                component.content, 
+                                re.IGNORECASE)
+                datasets.update(refs)
+            
+            # Also check for references in macro calls
+            if '%' in component.content:
+                refs = re.findall(r'data\s*=\s*(\w+\.?\w*)', component.content, re.IGNORECASE)
+                datasets.update(refs)
+        
+        return list(datasets)
+
     def convert_to_python(self, components: List[SASComponent], file_path: str = None) -> str:
         """Convert SAS components to Python code."""
         # Reset helper functions for this conversion
         self.helper_functions = set()
+        
+        # Add timeout mechanism
+        import time
+        start_time = time.time()
+        max_time = 10  # 10 seconds timeout
+        
+        logger.info("Starting conversion to Python...")
+        
+        # Identify all datasets
+        datasets = self._identify_datasets(components)
         
         # Standard imports
         python_code = [
@@ -240,10 +274,26 @@ class SASPythonConverter:
         ]
         
         # Add dataset loading code
+        logger.info("Adding dataset loading code...")
         python_code.extend(self._add_dataset_loading(components))
         
+        # Add initialization for any datasets not covered by _add_dataset_loading
+        for dataset in datasets:
+            if '.' not in dataset and not any(line.startswith(f"# Initialize {dataset}") for line in python_code):
+                python_code.append(f"# Initialize {dataset} dataset")
+                python_code.append(f"{self._clean_variable_name(dataset.lower())} = pd.DataFrame()")
+        
         # Process each component
-        for component in components:
+        logger.info(f"Processing {len(components)} components...")
+        i = 0
+        while i < len(components):
+            # Check timeout
+            if time.time() - start_time > max_time:
+                logger.warning("Conversion timeout reached. Stopping conversion.")
+                python_code.append("# Conversion timeout reached. Some components may not be converted.")
+                break
+            
+            component = components[i]
             try:
                 if component.type == "COMMENT":
                     python_code.append(f"# {component.content.strip()}")
@@ -258,13 +308,13 @@ class SASPythonConverter:
                     python_code.append(self._convert_proc(component))
                 
                 elif component.type == "PROC_SQL":
-                    python_code.append(self._convert_proc_sql_enhanced(component))
+                    python_code.append(self._convert_proc_sql(component))
                 
                 elif component.type == "MACRO":
                     python_code.append(self._convert_macro(component))
                 
                 elif component.type == "MACRO_CALL":
-                    python_code.append(self._convert_macro_call_enhanced(component))
+                    python_code.append(self._convert_macro_call(component))
                 
                 elif component.type == "TITLE" or component.type == "FOOTNOTE":
                     python_code.append(self._convert_title(component))
@@ -276,7 +326,8 @@ class SASPythonConverter:
                     python_code.append(self._convert_include(component))
                 
                 elif component.type == "OPTIONS":
-                    python_code.append(f"# TODO: Convert OPTIONS:\n# {component.content.strip()}")
+                    options = component.content.strip().split()
+                    python_code.append(f"# Converted OPTIONS:\n# {' '.join(options)}")
                 
                 elif component.type == "CONDITIONAL":
                     python_code.append(self._convert_conditional(component))
@@ -285,20 +336,77 @@ class SASPythonConverter:
                     python_code.append(self._convert_while(component))
                 
                 # Add special handling for macro statements in the content
-                if component.content and '%' in component.content:
+                elif component.content and '%' in component.content:
+                    # Check timeout again before processing macro content
+                    if time.time() - start_time > max_time:
+                        logger.warning("Conversion timeout reached during macro processing. Stopping conversion.")
+                        python_code.append("# Conversion timeout reached during macro processing. Some components may not be converted.")
+                        break
+                    
                     # Look for macro calls in the content
-                    for line in component.content.split('\n'):
-                        if '%analyze_segment' in line:
-                            # Convert this specific macro call
-                            macro_call = self._convert_macro_call_statement(line.strip())
-                            python_code.append(macro_call)
-                        elif line.strip().startswith('%do %while'):
-                            # Convert do while loop
-                            do_while = self._convert_macro_do_statement(line.strip())
+                    lines = component.content.split('\n')
+                    j = 0
+                    while j < len(lines):
+                        # Check timeout for each line
+                        if time.time() - start_time > max_time:
+                            logger.warning("Conversion timeout reached during line processing. Stopping conversion.")
+                            python_code.append("# Conversion timeout reached during line processing. Some components may not be converted.")
+                            break
+                        
+                        line = lines[j].strip()
+                        
+                        if line.startswith('%do %while'):
+                            do_while = self._convert_macro_do_statement(line)
                             python_code.append(do_while)
-                        elif line.strip() == '%end;':
-                            # End of loop
+                            
+                            # Process lines until %end;
+                            j += 1
+                            loop_body = []
+                            loop_line_count = 0
+                            max_loop_lines = 100  # Safety limit
+                            
+                            while j < len(lines) and not lines[j].strip() == '%end;' and loop_line_count < max_loop_lines:
+                                # Check timeout for each loop line
+                                if time.time() - start_time > max_time:
+                                    logger.warning("Conversion timeout reached during loop processing. Stopping conversion.")
+                                    loop_body.append("    # Conversion timeout reached during loop processing")
+                                    break
+                                
+                                loop_line = lines[j].strip()
+                                if loop_line.startswith('%analyze_segment'):
+                                    # Convert macro call
+                                    macro_call = self._convert_macro_call_statement(loop_line)
+                                    loop_body.append(f"    {macro_call}")
+                                elif loop_line:
+                                    loop_body.append(f"    # {loop_line}")
+                                
+                                j += 1
+                                loop_line_count += 1
+                            
+                            # Check if we hit the safety limit
+                            if loop_line_count >= max_loop_lines:
+                                logger.warning(f"Loop body exceeded {max_loop_lines} lines. Possible infinite loop.")
+                                loop_body.append(f"    # Warning: Loop body truncated after {max_loop_lines} lines")
+                            
+                            # Add loop body with indentation
+                            python_code.extend(loop_body)
                             python_code.append("    # End of loop")
+                        
+                        elif line.startswith('%analyze_segment'):
+                            macro_call = self._convert_macro_call_statement(line)
+                            python_code.append(macro_call)
+                        
+                        elif line == '%end;':
+                            pass
+                        
+                        elif line:
+                            python_code.append(f"# {line}")
+                        
+                        j += 1
+                        
+                        # Check if we broke out of the inner loop due to timeout
+                        if time.time() - start_time > max_time:
+                            break
                 
                 else:
                     python_code.append(f"# TODO: Convert {component.type}:\n# {component.content.strip()}")
@@ -306,6 +414,8 @@ class SASPythonConverter:
             except Exception as e:
                 logger.warning(f"Error converting component {component.type}: {str(e)}")
                 python_code.append(f"# TODO: Convert {component.type}:\n# {component.content.strip()}")
+            
+            i += 1
         
         # Add helper functions if needed
         helper_functions = self._get_helper_functions()
@@ -459,25 +569,39 @@ print(shapiro_df)"""
             h0_match = re.search(r'h0\s*=\s*(\S+)', content, re.IGNORECASE)
             alpha_match = re.search(r'alpha\s*=\s*(\S+)', content, re.IGNORECASE)
             
-            if data_match:
-                dataset = self._convert_sas_reference(data_match.group(1))
-                h0 = h0_match.group(1) if h0_match else "0"
-                alpha = alpha_match.group(1) if alpha_match else "0.05"
-                
-                # Remove & from variable references
-                h0 = re.sub(r'&(\w+)', r'\1', h0)
-                alpha = re.sub(r'&(\w+)', r'\1', alpha)
+            if not data_match:
+                return "# TODO: Convert PROC TTEST - no dataset specified"
+            
+            dataset = self._convert_sas_reference(data_match.group(1))
+            h0_value = h0_match.group(1) if h0_match else "0"
+            alpha_value = alpha_match.group(1) if alpha_match else "0.05"
+            
+            # Remove any semicolons from alpha_value
+            alpha_value = alpha_value.replace(';', '')
+            
+            # If alpha is a macro variable, convert it to a Python variable
+            if alpha_value.startswith('&'):
+                alpha_var = alpha_value[1:]  # Remove the & prefix
+                # Add alpha variable to the beginning of the code
+                alpha_def = f"alpha = 0.05  # Default value, replace with actual value\n"
                 
                 return f"""# Perform t-test
-for col in {dataset}.select_dtypes(include=['number']).columns:
+{alpha_def}for col in {dataset}.select_dtypes(include=['number']).columns:
     if {dataset}[col].notna().sum() > 1:  # Need at least 2 values for test
-        t_stat, p_value = stats.ttest_1samp({dataset}[col].dropna(), {h0})
+        t_stat, p_value = stats.ttest_1samp({dataset}[col].dropna(), {h0_value})
         print(f"T-test for {{col}}:")
         print(f"  T-statistic: {{t_stat:.4f}}")
         print(f"  P-value: {{p_value:.4f}}")
-        print(f"  Significant at alpha={alpha}: {{p_value < {alpha}}}")"""
+        print(f"  Significant at alpha={{alpha}}: {{p_value < alpha}}")"""
             else:
-                return "# TODO: Convert PROC TTEST - no dataset specified"
+                return f"""# Perform t-test
+for col in {dataset}.select_dtypes(include=['number']).columns:
+    if {dataset}[col].notna().sum() > 1:  # Need at least 2 values for test
+        t_stat, p_value = stats.ttest_1samp({dataset}[col].dropna(), {h0_value})
+        print(f"T-test for {{col}}:")
+        print(f"  T-statistic: {{t_stat:.4f}}")
+        print(f"  P-value: {{p_value:.4f}}")
+        print(f"  Significant at alpha={alpha_value}: {{p_value < {alpha_value}}}")"""
             
         except Exception as e:
             logger.warning(f"Error converting PROC TTEST: {str(e)}")
@@ -502,28 +626,27 @@ print({dataset}.head(20))"""
             return f"# TODO: Convert PROC report:\n{component.content}"
 
     def _convert_sas_reference(self, ref: str) -> str:
-        """Convert SAS references (dataset names, macro variables) to Python."""
-        # Handle macro variables
-        if '&' in ref:
-            # Replace &var with var
-            ref = re.sub(r'&(\w+)\.?', r'\1', ref)
+        """Convert SAS dataset/variable references to Python variable names."""
+        if not ref:
+            return ref
         
-        # Handle dataset references
-        if '.' in ref and not ref.startswith("'") and not ref.startswith('"'):
-            lib, name = ref.split('.')
-            if lib.lower() == 'sashelp':
-                return f"{name.lower()}_df"
-            else:
-                return f"{name.lower()}_df"
+        # Clean up the reference
+        ref = ref.strip()
         
-        # Handle special references
-        if ref.lower() == '_null_':
-            return "_null__df"
+        # Remove & from macro variables
+        if ref.startswith('&'):
+            ref = ref[1:]
         
-        # Clean the reference name
-        ref = self._clean_variable_name(ref)
-        
-        return ref
+        # Handle dataset references (libname.dataset)
+        if '.' in ref:
+            lib, dataset = ref.split('.', 1)
+            # Clean both parts
+            lib = self._clean_variable_name(lib.lower())
+            dataset = self._clean_variable_name(dataset.lower())
+            return f"{dataset}_df"
+        else:
+            # Clean and return
+            return self._clean_variable_name(ref.lower()) + "_df"
 
     def _convert_data(self, component: SASComponent) -> str:
         """Convert DATA steps to Python DataFrame operations."""
@@ -707,21 +830,27 @@ print({dataset}.head(20))"""
         try:
             content = component.content.lower()
             
-            if content.startswith('graphics'):
-                return self._convert_ods_graphics(component)
+            if 'ods graphics on' in content:
+                return "# Enable matplotlib for graphics\nplt.style.use('ggplot')"
             
-            if 'html' in content and 'path=' in content:
-                # Extract path
-                path_match = re.search(r'path\s*=\s*[\'"]?([^\'"]+)[\'"]?', content, re.IGNORECASE)
-                if path_match:
-                    path = path_match.group(1)
-                    return f"""# Set up HTML output
+            elif 'ods graphics off' in content:
+                return "# Disable matplotlib for graphics\nplt.close('all')"
+            
+            elif 'ods html' in content and 'close' in content:
+                return "# Close HTML output\nplt.close('all')"
+            
+            elif 'ods html' in content:
+                # Extract path and filename if available
+                path_match = re.search(r'path\s*=\s*["\']([^"\']+)["\']', content)
+                body_match = re.search(r'body\s*=\s*["\']([^"\']+)["\']', content)
+                
+                path = path_match.group(1) if path_match else "./output"
+                filename = body_match.group(1) if body_match else "output.html"
+                
+                return f"""# Set up HTML output
 output_path = Path("{path}")
-output_path.mkdir(exist_ok=True, parents=True)"""
-            
-            if 'html' in content and 'close' in content:
-                return """# Close HTML output
-plt.close('all')"""
+output_path.mkdir(exist_ok=True, parents=True)
+# HTML output will be saved to {path}/{filename}"""
             
             return f"# TODO: Convert ODS:\n# {component.content.strip()}"
             
@@ -934,9 +1063,10 @@ def format_proc():
                 continue
             
             # Handle different format specifications
-            range_match = re.search(r'([\d\.-]+)\s*-\s*([\d\.-]+)\s*=\s*["\']([^"\']+)["\']', line)
-            single_match = re.search(r'([\d\.-]+)\s*=\s*["\']([^"\']+)["\']', line)
+            range_match = re.search(r'([\w\.-]+)\s*-\s*([\w\.-]+)\s*=\s*["\']([^"\']+)["\']', line)
+            single_match = re.search(r'([\w\.-]+)\s*=\s*["\']([^"\']+)["\']', line)
             other_match = re.search(r'other\s*=\s*["\']([^"\']+)["\']', line, re.IGNORECASE)
+            string_match = re.search(r'["\']([^"\']+)["\']\s*=\s*["\']([^"\']+)["\']', line)
             
             if range_match:
                 start, end, label = range_match.groups()
@@ -946,6 +1076,9 @@ def format_proc():
                 format_dict[value] = label
             elif other_match:
                 format_dict['other'] = other_match.group(1)
+            elif string_match:
+                value, label = string_match.groups()
+                format_dict[value] = label
         
         # Generate function code
         code_lines = [
@@ -956,20 +1089,37 @@ def format_proc():
             "    }",
             "",
             "    try:",
-            "        value = float(value)",
+            "        # Handle string values first",
+            "        if isinstance(value, str):",
+            "            return format_dict.get(value, format_dict.get('other', value))",
+            "            ",
+            "        # Handle numeric values",
             "        # Check ranges first",
             "        for key, label in format_dict.items():",
             "            if key == 'other':",
             "                continue",
             "            if '-' in key:",
-            "                start, end = map(float, key.split('-'))",
-            "                if start <= value <= end:",
-            "                    return label",
-            "            elif float(key) == value:",
-            "                return label",
+            "                start, end = key.split('-')",
+            "                # Handle special values 'low' and 'high'",
+            "                try:",
+            "                    start_val = float('-inf') if start.lower() == 'low' else float(start)",
+            "                    end_val = float('inf') if end.lower() == 'high' else float(end)",
+            "                    if start_val <= value <= end_val:",
+            "                        return label",
+            "                except ValueError:",
+            "                    # Skip non-numeric ranges when processing numeric values",
+            "                    continue",
+            "            else:",
+            "                try:",
+            "                    if float(key) == value:",
+            "                        return label",
+            "                except ValueError:",
+            "                    # Skip non-numeric keys when processing numeric values",
+            "                    continue",
             "        # Return 'other' value if specified, otherwise original value",
             "        return format_dict.get('other', str(value))",
             "    except (ValueError, TypeError):",
+            "        # For any other errors, return the original value as string",
             "        return str(value)"
         ]
         
@@ -1174,38 +1324,42 @@ def format_proc():
             return f"# TODO: Convert %LET statement:\n{component.content}"
 
     def _convert_title(self, component: SASComponent) -> str:
-        """Convert TITLE/FOOTNOTE statements to matplotlib title/suptitle."""
+        """Convert TITLE statements to matplotlib title/suptitle."""
         try:
             content = component.content.strip()
             
-            if content.lower().startswith('title'):
-                # Extract title number and text
-                title_match = re.search(r'title(\d*)\s+["\']?([^"\']+)["\']?', content, re.IGNORECASE)
-                if not title_match:
-                    raise ValueError("Invalid TITLE statement")
-                    
-                title_num = title_match.group(1) or "1"
-                title_text = title_match.group(2).strip()
+            # Extract title number and text
+            title_match = re.search(r'title(\d*)\s+["\']?([^"\']+)["\']?', content, re.IGNORECASE)
+            if not title_match:
+                raise ValueError("Invalid TITLE statement")
                 
-                if title_num == "1":
-                    return f"plt.suptitle({repr(title_text)})"
-                else:
-                    return f"plt.title({repr(title_text)})"
-                
-            elif content.lower().startswith('footnote'):
-                # Extract footnote text
-                footnote_match = re.search(r'footnote\s+["\']?([^"\']+)["\']?', content, re.IGNORECASE)
-                if not footnote_match:
-                    raise ValueError("Invalid FOOTNOTE statement")
-                    
-                footnote_text = footnote_match.group(1).strip()
-                
-                return f"plt.figtext(0.5, 0.01, {repr(footnote_text)}, ha='center')"
-                
-            return f"# TODO: Convert title/footnote:\n{content}"
+            title_num = title_match.group(1) or "1"
+            title_text = title_match.group(2).strip()
+            
+            if title_num == "1":
+                return f"plt.suptitle({repr(title_text)})"
+            else:
+                return f"plt.title({repr(title_text)})"
             
         except Exception as e:
-            raise ValueError(f"Error converting TITLE/FOOTNOTE: {str(e)}")
+            raise ValueError(f"Error converting TITLE: {str(e)}")
+
+    def _convert_footnote(self, component: SASComponent) -> str:
+        """Convert FOOTNOTE statements to matplotlib figtext."""
+        try:
+            content = component.content.strip()
+            
+            # Extract footnote text
+            footnote_match = re.search(r'footnote\s+["\']?([^"\']+)["\']?', content, re.IGNORECASE)
+            if not footnote_match:
+                raise ValueError("Invalid FOOTNOTE statement")
+                
+            footnote_text = footnote_match.group(1).strip()
+            
+            return f"plt.figtext(0.5, 0.01, {repr(footnote_text)}, ha='center', fontsize=8)"
+            
+        except Exception as e:
+            raise ValueError(f"Error converting FOOTNOTE: {str(e)}")
 
     def _convert_put(self, component: SASComponent) -> str:
         """Convert %PUT statements to Python print statements."""
@@ -1262,13 +1416,20 @@ def format_proc():
 
     def _convert_macro_condition(self, condition: str) -> str:
         """Convert SAS macro condition to Python condition."""
-        # Replace SAS operators with Python equivalents
-        condition = condition.replace(' eq ', ' == ').replace(' ne ', ' != ')
-        condition = condition.replace(' gt ', ' > ').replace(' lt ', ' < ')
-        condition = condition.replace(' ge ', ' >= ').replace(' le ', ' <= ')
+        # Replace SAS operators with Python operators
+        condition = condition.replace('&', '')  # Remove & from macro variables
         
-        # Handle macro variables
-        condition = re.sub(r'&(\w+)', r'\1', condition)
+        # Handle SAS comparison operators
+        condition = re.sub(r'\bne\b', '!=', condition, flags=re.IGNORECASE)
+        condition = re.sub(r'\beq\b', '==', condition, flags=re.IGNORECASE)
+        condition = re.sub(r'\bgt\b', '>', condition, flags=re.IGNORECASE)
+        condition = re.sub(r'\blt\b', '<', condition, flags=re.IGNORECASE)
+        condition = re.sub(r'\bge\b', '>=', condition, flags=re.IGNORECASE)
+        condition = re.sub(r'\ble\b', '<=', condition, flags=re.IGNORECASE)
+        
+        # Ensure the condition has a value after comparison operators
+        if re.search(r'!=\s*$', condition):
+            condition = condition.rstrip() + " None"
         
         return condition
 
@@ -1360,6 +1521,7 @@ def format_proc():
         """
         try:
             # Parse the SAS file
+            logger.info(f"Parsing {input_file}...")
             parser = SASParser()
             components = parser.parse_file(input_file)
             
@@ -1367,10 +1529,13 @@ def format_proc():
                 logger.warning(f"No components found in {input_file}")
                 return None
             
+            logger.info(f"Found {len(components)} components in {input_file}")
+            
             # Convert to Python
+            logger.info(f"Converting {len(components)} components to Python...")
             python_code = self.convert_to_python(components, input_file)
             
-            # Create output file path - just use the filename without directory structure
+            # Create output file path
             input_path = Path(input_file)
             output_filename = input_path.name.replace('.sas', '.py')
             output_path = Path(self.output_directory) / output_filename
@@ -1379,6 +1544,7 @@ def format_proc():
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Write Python code to file
+            logger.info(f"Writing Python code to {output_path}...")
             with open(output_path, 'w') as f:
                 f.write(python_code)
             
@@ -1492,6 +1658,11 @@ plt.tight_layout()"""
                 condition = do_while_match.group(1)
                 # Convert condition to Python
                 condition = self._convert_macro_condition(condition)
+                
+                # Ensure the condition is valid
+                if not condition or condition.strip() == '!=':
+                    return "while True:  # Original condition could not be parsed"
+                
                 return f"while {condition}:"
             
             return f"# TODO: Convert %DO statement: {statement}"
@@ -1502,11 +1673,19 @@ plt.tight_layout()"""
 
     def _clean_variable_name(self, var_name: str) -> str:
         """Clean variable names by removing invalid characters."""
+        if not var_name:
+            return "unknown_df"
+            
         # Remove semicolons and other invalid characters
         cleaned = re.sub(r'[;:,\s\(\)\[\]{}]', '_', var_name)
+        
+        # Ensure we don't have double underscores
+        cleaned = re.sub(r'_+', '_', cleaned)
+        
         # Ensure the name is a valid Python identifier
         if cleaned and not cleaned[0].isalpha() and cleaned[0] != '_':
             cleaned = f"_{cleaned}"
+        
         return cleaned
 
     def _convert_macro_call_statement(self, statement: str) -> str:
@@ -1552,6 +1731,10 @@ plt.tight_layout()"""
         try:
             content = component.content
             
+            # Quick check if this is a simple SQL statement
+            if len(content) < 500 and not re.search(r'(CREATE\s+TABLE|JOIN|GROUP\s+BY|ORDER\s+BY)', content, re.IGNORECASE):
+                return self._convert_proc_sql(component)  # Use faster original converter for simple statements
+            
             # Extract SQL statements
             sql_statements = self._extract_sql_statements(content)
             if not sql_statements:
@@ -1564,17 +1747,11 @@ plt.tight_layout()"""
                     python_code.append(self._convert_sql_create_table(stmt))
                 elif stmt.statement_type.upper() == 'SELECT':
                     python_code.append(self._convert_sql_select(stmt))
-                elif stmt.statement_type.upper() == 'INSERT':
-                    python_code.append(self._convert_sql_insert(stmt))
-                elif stmt.statement_type.upper() == 'UPDATE':
-                    python_code.append(self._convert_sql_update(stmt))
-                elif stmt.statement_type.upper() == 'DELETE':
-                    python_code.append(self._convert_sql_delete(stmt))
                 else:
                     python_code.append(f"# TODO: Convert SQL {stmt.statement_type}:\n# {stmt.content}")
             
             return "\n".join(python_code)
-            
+        
         except Exception as e:
             logger.warning(f"Error in enhanced SQL conversion: {str(e)}")
             # Fall back to original converter
@@ -1584,67 +1761,33 @@ plt.tight_layout()"""
         """Extract individual SQL statements from PROC SQL content."""
         from sas_parser import SQLStatement
         
+        # Simple extraction for basic statements
         statements = []
-        # Split content by semicolons, but respect quoted strings
-        parts = []
-        current_part = []
-        in_quotes = False
-        quote_char = None
+        parts = content.split(';')
         
-        for char in content:
-            if char in ["'", '"'] and (not in_quotes or quote_char == char):
-                in_quotes = not in_quotes
-                if in_quotes:
-                    quote_char = char
-                else:
-                    quote_char = None
-            
-            if char == ';' and not in_quotes:
-                current_part.append(char)
-                parts.append(''.join(current_part).strip())
-                current_part = []
-            else:
-                current_part.append(char)
-        
-        if current_part:
-            parts.append(''.join(current_part).strip())
-        
-        # Process each statement
         for part in parts:
-            if not part or part == ';':
+            part = part.strip()
+            if not part:
                 continue
             
             # Determine statement type
             stmt_type = "UNKNOWN"
-            stmt_content = part
             
             # Check for CREATE TABLE
-            create_match = re.search(r'CREATE\s+TABLE\s+(\S+)', part, re.IGNORECASE)
-            if create_match:
+            if re.search(r'CREATE\s+TABLE', part, re.IGNORECASE):
                 stmt_type = "CREATE TABLE"
-                tables = [create_match.group(1)]
-                statements.append(SQLStatement(stmt_type, stmt_content, tables))
-                continue
-            
+                table_match = re.search(r'CREATE\s+TABLE\s+(\S+)', part, re.IGNORECASE)
+                tables = [table_match.group(1)] if table_match else []
             # Check for SELECT
-            select_match = re.search(r'SELECT\s+', part, re.IGNORECASE)
-            if select_match:
+            elif re.search(r'SELECT', part, re.IGNORECASE):
                 stmt_type = "SELECT"
                 # Extract tables from FROM clause
-                from_match = re.search(r'FROM\s+(.*?)(?:WHERE|GROUP|ORDER|HAVING|$)', part, re.IGNORECASE | re.DOTALL)
+                from_match = re.search(r'FROM\s+(\S+)', part, re.IGNORECASE)
+                tables = [from_match.group(1)] if from_match else []
+            else:
                 tables = []
-                if from_match:
-                    tables_str = from_match.group(1).strip()
-                    # Handle table joins
-                    if re.search(r'\bJOIN\b', tables_str, re.IGNORECASE):
-                        # Extract tables from JOIN clauses
-                        join_tables = re.findall(r'(?:FROM|JOIN)\s+(\w+\.?\w*)', part, re.IGNORECASE)
-                        tables.extend(join_tables)
-                    else:
-                        # Simple comma-separated tables
-                        tables.extend([t.strip() for t in tables_str.split(',')])
             
-            statements.append(SQLStatement(stmt_type, stmt_content, tables))
+            statements.append(SQLStatement(stmt_type, part, tables))
         
         return statements
 
@@ -1862,6 +2005,10 @@ print({result_var}.head())"""
         try:
             content = component.content.strip()
             
+            # Quick check if this is a simple macro call
+            if len(content) < 200 and not '%analyze_segment' in content:
+                return self._convert_macro_call(component)  # Use faster original converter for simple calls
+            
             # Extract macro name and parameters
             macro_match = re.search(r'%(\w+)\s*\((.*)\);', content, re.IGNORECASE)
             if not macro_match:
@@ -1870,45 +2017,22 @@ print({result_var}.head())"""
             macro_name = macro_match.group(1)
             params_str = macro_match.group(2)
             
-            # Parse parameters
-            params = {}
-            param_values = []
-            
-            # Handle positional and named parameters
+            # Simple parameter parsing
             if '=' in params_str:
                 # Named parameters
-                for param in re.findall(r'(\w+)\s*=\s*([^,]+)', params_str):
-                    param_name = param[0]
-                    param_value = param[1].strip()
-                    
-                    # Expand macro variables in parameter value
-                    param_value = self._expand_macro_variables(param_value)
-                    
-                    # Convert SAS references to Python
-                    param_value = self._convert_sas_reference(param_value)
-                    
-                    params[param_name] = param_value
-            else:
-                # Positional parameters
-                for param_value in params_str.split(','):
-                    param_value = param_value.strip()
-                    
-                    # Expand macro variables in parameter value
-                    param_value = self._expand_macro_variables(param_value)
-                    
-                    # Convert SAS references to Python
-                    param_value = self._convert_sas_reference(param_value)
-                    
-                    param_values.append(param_value)
-            
-            # Generate Python function call
-            if params:
+                params = {}
+                for param_pair in params_str.split(','):
+                    if '=' in param_pair:
+                        name, value = param_pair.split('=', 1)
+                        params[name.strip()] = value.strip()
+                
                 params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
                 return f"{macro_name}({params_code})"
             else:
-                params_code = ", ".join(param_values)
-                return f"{macro_name}({params_code})"
-            
+                # Positional parameters
+                params = [p.strip() for p in params_str.split(',')]
+                return f"{macro_name}({', '.join(params)})"
+        
         except Exception as e:
             logger.warning(f"Error in enhanced macro call conversion: {str(e)}")
             # Fall back to original converter

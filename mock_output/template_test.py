@@ -29,15 +29,9 @@ filtered_df = pd.DataFrame()
 # Load sashelp.class
 class_df = load_sashelp_dataset('class')
 # Calculate descriptive statistics
-class;_df_stats = class;_df.describe()
-print(class;_df_stats)
-# TODO: Convert PROC:
-# PROC MEANS data=sashelp.class;
+class__df_stats = class__df.describe()
+print(class__df_stats)
 # Create new DataFrame filtered
-filtered = pd.DataFrame()
-# TODO: Convert DATA:
-# DATA filtered;
+filtered_df = pd.DataFrame()
 # TODO: Convert PROC SQL:
-# PROC SQL;
-# TODO: Convert PROC_SQL:
 # PROC SQL;

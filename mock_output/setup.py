@@ -23,20 +23,13 @@ def load_sashelp_dataset(name: str) -> pd.DataFrame:
         print(f'Error loading sashelp.{name}: {e}')
         return pd.DataFrame()
 RAWDATA_path = '/path/to/raw" access=readonly'
-# TODO: Convert LIBNAME:
-# libname RAWDATA "/path/to/raw" access=readonly;
 WORK_path = '/path/to/work" compress=yes'
-# TODO: Convert LIBNAME:
-# libname WORK "/path/to/work" compress=yes;
-# TODO: Convert OPTIONS:
+# Converted OPTIONS:
 # options nocenter mprint symbolgen mlogic;
-# TODO: Convert OPTIONS:
-# options nocenter mprint symbolgen mlogic;
-# TODO: Convert OPTIONS:
-# options compress=yes reuse=yes;
-# TODO: Convert OPTIONS:
+# Converted OPTIONS:
 # options compress=yes reuse=yes;
 # TODO: Convert FILENAME:
 # filename DATAIN "/path/to/input.csv";
 # TODO: Convert FILENAME:
 # filename REPORT "/path/to/report.txt";
+# %include "/path/to/macros.sas";

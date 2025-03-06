@@ -34,12 +34,12 @@ noprint_df = pd.DataFrame()
 
 # Initialize normal dataset
 normal_df = pd.DataFrame()
+# %let alpha = 0.05;
+# %let min_obs = 1000;
 # TODO: Implement PROC format
 def format_proc():
     """Python equivalent of PROC FORMAT"""
     pass
-# TODO: Convert PROC:
-# proc format;
 def analyze_segment(data, segment, var):
     """
     Converted from SAS macro
@@ -47,43 +47,35 @@ def analyze_segment(data, segment, var):
     """
     pass
 # Calculate descriptive statistics
-data_stats = data.describe()
-print(data_stats)
-# TODO: Convert PROC:
-# proc means data=&data noprint;
+data_df_stats = data_df.describe()
+print(data_df_stats)
 # Create new DataFrame _null_
 _null__df = pd.DataFrame()
-# TODO: Convert DATA:
-# data _null_;
+# %if &skip_analysis = 0 %then %do;
 # Detailed descriptive statistics
-data_stats = data.describe(percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
-print(data_stats)
+data_df_stats = data_df.describe(percentiles=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
+print(data_df_stats)
 
 # Normality tests
 shapiro_results = []
-for col in data.select_dtypes(include=['number']).columns:
-    if data[col].notna().sum() > 3:  # Need at least 3 values for test
-        stat, p = stats.shapiro(data[col].dropna())
+for col in data_df.select_dtypes(include=['number']).columns:
+    if data_df[col].notna().sum() > 3:  # Need at least 3 values for test
+        stat, p = stats.shapiro(data_df[col].dropna())
         shapiro_results.append({'column': col, 'statistic': stat, 'p-value': p})
         
 shapiro_df = pd.DataFrame(shapiro_results)
 print("Shapiro-Wilk test for normality:")
 print(shapiro_df)
-# TODO: Convert PROC:
-# proc univariate data=&data normal plot;
 # Perform t-test
-for col in data.select_dtypes(include=['number']).columns:
-    if data[col].notna().sum() > 1:  # Need at least 2 values for test
-        t_stat, p_value = stats.ttest_1samp(data[col].dropna(), 0)
+alpha = 0.05  # Default value, replace with actual value
+for col in data_df.select_dtypes(include=['number']).columns:
+    if data_df[col].notna().sum() > 1:  # Need at least 2 values for test
+        t_stat, p_value = stats.ttest_1samp(data_df[col].dropna(), 0)
         print(f"T-test for {col}:")
         print(f"  T-statistic: {t_stat:.4f}")
         print(f"  P-value: {p_value:.4f}")
-        print(f"  Significant at alpha=alpha;: {p_value < alpha;}")
-# TODO: Convert PROC:
-# proc ttest data=&data h0=0 alpha=&alpha;
+        print(f"  Significant at alpha={alpha}: {p_value < alpha}")
 # TODO: Convert PROC SQL:
-# proc sql noprint;
-# TODO: Convert PROC_SQL:
 # proc sql noprint;
 def run_analysis():
     """
@@ -91,33 +83,29 @@ def run_analysis():
     Original: %macro run_analysis;...
     """
     pass
-while segment ne:
-# TODO: Convert macro call: %analyze_segment(
+# %let i = 1;
+# %let segment = %scan(&segment_list, &i);
+while segment != None:
+    # TODO: Convert macro call: %analyze_segment(
+    # data=WORK.analysis_data,
+    # segment=&segment,
+    # var=response_time
+    # );
     # End of loop
-# TODO: Convert ODS:
-# %run_analysis;
- 
-ods graphics on;
+# %let i = %eval(&i + 1);
+# %let segment = %scan(&segment_list, &i);
+# %mend run_analysis;
+# Enable matplotlib for graphics
+plt.style.use('ggplot')
 # Set up HTML output
 output_path = Path("./output")
 output_path.mkdir(exist_ok=True, parents=True)
-# TODO: Convert ODS:
-# ods html path="./output"
-body="analysis_report.html"
-style=statistical;
+# HTML output will be saved to ./output/analysis_report.html
 plt.suptitle('Statistical Analysis Report')
-# TODO: Convert TITLE:
-# title1 "Statistical Analysis Report";
 plt.title('By Segment')
-# TODO: Convert TITLE:
-# title2 "By Segment";
 # TODO: Convert PROC_R:
 # proc report data=WORK.analysis_data;
 # Close HTML output
 plt.close('all')
-# TODO: Convert ODS:
-# ods html close;
-# TODO: Convert ODS:
-# ods graphics off;
-# TODO: Convert ODS:
-# ods graphics off;
+# Disable matplotlib for graphics
+plt.close('all')
