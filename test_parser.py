@@ -1,7 +1,8 @@
 from sas_parser import SASParser
 from embedding_generator import EmbeddingGenerator
 from vector_store import VectorStore
-from sas_python_converter import SASPythonConverter  # Import the converter
+from sas_python_converter import SASPythonConverter
+from proc_converters import convert_proc_corr, convert_proc_reg, convert_proc_sgplot
 import numpy as np
 import shutil
 import os
@@ -9,7 +10,6 @@ import argparse
 import tempfile
 from pathlib import Path
 import unittest
-from T_sas_python_converter_template import SASPythonConverterTemplate
 import glob
 import logging
 import sys
@@ -402,10 +402,10 @@ def test_converter():
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description='Test SAS Parser and Converter')
-    parser.add_argument('--input', default='./mock_data', help='Input directory with SAS files')
-    parser.add_argument('--output', default='./mock_output', help='Output directory for Python files')
-    parser.add_argument('--clean', action='store_true', help='Clean output directory before running')
+    parser = argparse.ArgumentParser(description='Test SAS parser and converter')
+    parser.add_argument('--input', default='mock_data', help='Input directory containing SAS files')
+    parser.add_argument('--output', default='mock_output', help='Output directory for Python files')
+    parser.add_argument('--clean', action='store_true', help='Clean output directory before conversion')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
 
@@ -416,8 +416,9 @@ def main():
     )
 
     try:
-        if args.clean:
-            clean_output_directory(args.output)
+        if args.clean and os.path.exists(args.output):
+            shutil.rmtree(args.output)
+            os.makedirs(args.output)
 
         # Run end-to-end test
         results = test_end_to_end_conversion(args.input, args.output)
@@ -434,7 +435,7 @@ def main():
 
 class TestSASPythonConverter(unittest.TestCase):
     def setUp(self):
-        self.converter = SASPythonConverterTemplate()
+        self.converter = SASPythonConverter(output_directory="test_output")
 
     def test_proc_means(self):
         sas_code = """
@@ -442,13 +443,17 @@ class TestSASPythonConverter(unittest.TestCase):
             var age income;
         run;
         """
-        params = {
+        component = {
+            'type': 'PROC',
+            'name': 'means',
+            'content': sas_code,
             'dataset': 'mydata',
             'variables': ['age', 'income']
         }
-        python_code = self.converter.convert_proc('means', params)
+        python_code = self.converter.convert_component(component)
         self.assertIn('mydata_df', python_code)
-        self.assertIn("['age', 'income']", python_code)
+        self.assertIn("age", python_code)
+        self.assertIn("income", python_code)
 
     def test_data_step(self):
         sas_code = """

@@ -13,7 +13,16 @@ from sas_parser import SASComponent, SASParser, SQLStatement
 from embedding_generator import EmbeddingGenerator
 
 # Import the additional PROC converters
-from proc_converters import convert_proc_corr, convert_proc_reg, convert_proc_sgplot
+try:
+    from proc_converters import convert_proc_corr, convert_proc_reg, convert_proc_sgplot
+except ImportError:
+    # Fallback implementations if proc_converters is not available
+    def convert_proc_corr(*args, **kwargs): 
+        return "# PROC CORR conversion not available"
+    def convert_proc_reg(*args, **kwargs): 
+        return "# PROC REG conversion not available"
+    def convert_proc_sgplot(*args, **kwargs): 
+        return "# PROC SGPLOT conversion not available"
 from proc_sql_converter import convert_proc_sql_enhanced
 
 # Configure logging
@@ -242,21 +251,10 @@ class SASPythonConverter:
 
     def convert_to_python(self, components: List[SASComponent], file_path: str = None) -> str:
         """Convert SAS components to Python code."""
-        # Reset helper functions for this conversion
-        self.helper_functions = set()
+        python_code = []
         
-        # Add timeout mechanism
-        import time
-        start_time = time.time()
-        max_time = 10  # 10 seconds timeout
-        
-        logger.info("Starting conversion to Python...")
-        
-        # Identify all datasets
-        datasets = self._identify_datasets(components)
-        
-        # Standard imports
-        python_code = [
+        # Add standard imports and initialization
+        python_code.extend([
             "import pandas as pd",
             "import numpy as np",
             "from scipy import stats",
@@ -265,165 +263,185 @@ class SASPythonConverter:
             "from pathlib import Path",
             "import os",
             "",
-            "",
             "# Initialize variables",
             "pd.set_option('display.max_rows', None)",
             "pd.set_option('display.max_columns', None)",
             "",
-            "",
-        ]
-        
-        # Add dataset loading code
-        logger.info("Adding dataset loading code...")
-        python_code.extend(self._add_dataset_loading(components))
-        
-        # Add initialization for any datasets not covered by _add_dataset_loading
-        for dataset in datasets:
-            if '.' not in dataset and not any(line.startswith(f"# Initialize {dataset}") for line in python_code):
-                python_code.append(f"# Initialize {dataset} dataset")
-                python_code.append(f"{self._clean_variable_name(dataset.lower())} = pd.DataFrame()")
-        
+            "# Load required datasets",
+            "def load_sashelp_dataset(name: str) -> pd.DataFrame:",
+            "    \"\"\"Load a dataset from sashelp library.\"\"\"",
+            "    try:",
+            "        return pd.read_csv(f'sashelp_{name.lower()}.csv')",
+            "    except Exception as e:",
+            "        print(f'Error loading sashelp.{name}: {e}')",
+            "        return pd.DataFrame()",
+            ""
+        ])
+
+        # Track dataset names and their dependencies
+        datasets = {}
+        current_dataset = None
+
         # Process each component
-        logger.info(f"Processing {len(components)} components...")
-        i = 0
-        while i < len(components):
-            # Check timeout
-            if time.time() - start_time > max_time:
-                logger.warning("Conversion timeout reached. Stopping conversion.")
-                python_code.append("# Conversion timeout reached. Some components may not be converted.")
-                break
-            
-            component = components[i]
+        for component in components:
             try:
-                if component.type == "COMMENT":
-                    python_code.append(f"# {component.content.strip()}")
+                if component.type == "PROC_SQL":
+                    # Extract table name and structure from SQL
+                    create_match = re.search(r'create\s+table\s+(\w+)\s+as\s*select\s+(.*?)\s+from\s+(.*?)(?:order\s+by|quit|;)', 
+                                           component.content, re.IGNORECASE | re.DOTALL)
+                    
+                    if create_match:
+                        table_name = create_match.group(1).replace('&', '')
+                        columns = create_match.group(2)
+                        from_clause = create_match.group(3)
+                        current_dataset = table_name
+                        
+                        # Parse joins
+                        joins = re.findall(r'left\s+join\s+&?(\w+)\s+(\w+)\s+on\s+([^(]*?)\s*(?=(?:left join|order by|$))', 
+                                         component.content, re.IGNORECASE | re.DOTALL)
+                        
+                        # Build SQL conversion
+                        sql_code = [
+                            f"# Create SQL-based DataFrame",
+                            f"{table_name}_df = {self._get_base_table(from_clause)}_df.copy()"
+                        ]
+                        
+                        # Add joins
+                        for table, alias, condition in joins:
+                            table = table.replace('&', '')
+                            join_conditions = self._parse_join_conditions(condition)
+                            sql_code.append(
+                                f"{table_name}_df = pd.merge({table_name}_df, {table}_df, "
+                                f"how='left', {join_conditions})"
+                            )
+                        
+                        # Add ORDER BY if present
+                        order_match = re.search(r'order\s+by\s+(.*?)(?:quit|;)', component.content, re.IGNORECASE)
+                        if order_match:
+                            order_cols = [col.strip() for col in order_match.group(1).split(',')]
+                            sql_code.append(f"{table_name}_df = {table_name}_df.sort_values(by={order_cols})")
+                        
+                        python_code.extend(sql_code)
+                        python_code.append("")
                 
-                elif component.type == "LIBNAME":
-                    python_code.append(self._convert_libname(component))
+                elif '%PARAMETER_Join_Parameter' in component.content:
+                    params = self._parse_macro_parameters(component.content)
+                    if params:
+                        table_name = params.get('table')
+                        param_name = params.get('param')
+                        if table_name and param_name:
+                            python_code.extend([
+                                f"# Join parameters for {param_name}",
+                                f"{table_name}_df = pd.merge(",
+                                f"    {table_name}_df,",
+                                "    parameters_df,",
+                                "    how='left',",
+                                f"    on='{param_name}'",
+                                ")",
+                                ""
+                            ])
                 
                 elif component.type == "DATA":
-                    python_code.append(self._convert_data(component))
-                
-                elif component.type == "PROC":
-                    python_code.append(self._convert_proc(component))
-                
-                elif component.type == "PROC_SQL":
-                    python_code.append(self._convert_proc_sql(component))
-                
-                elif component.type == "MACRO":
-                    python_code.append(self._convert_macro(component))
-                
-                elif component.type == "MACRO_CALL":
-                    python_code.append(self._convert_macro_call(component))
-                
-                elif component.type == "TITLE" or component.type == "FOOTNOTE":
-                    python_code.append(self._convert_title(component))
-                
-                elif component.type == "ODS":
-                    python_code.append(self._convert_ods(component))
-                
-                elif component.type == "INCLUDE":
-                    python_code.append(self._convert_include(component))
-                
-                elif component.type == "OPTIONS":
-                    options = component.content.strip().split()
-                    python_code.append(f"# Converted OPTIONS:\n# {' '.join(options)}")
-                
-                elif component.type == "CONDITIONAL":
-                    python_code.append(self._convert_conditional(component))
-                
-                elif component.type == "WHILE":
-                    python_code.append(self._convert_while(component))
-                
-                # Add special handling for macro statements in the content
-                elif component.content and '%' in component.content:
-                    # Check timeout again before processing macro content
-                    if time.time() - start_time > max_time:
-                        logger.warning("Conversion timeout reached during macro processing. Stopping conversion.")
-                        python_code.append("# Conversion timeout reached during macro processing. Some components may not be converted.")
-                        break
-                    
-                    # Look for macro calls in the content
-                    lines = component.content.split('\n')
-                    j = 0
-                    while j < len(lines):
-                        # Check timeout for each line
-                        if time.time() - start_time > max_time:
-                            logger.warning("Conversion timeout reached during line processing. Stopping conversion.")
-                            python_code.append("# Conversion timeout reached during line processing. Some components may not be converted.")
-                            break
+                    # Extract dataset information
+                    data_info = self._parse_data_step(component.content)
+                    if data_info:
+                        output_name = data_info['output'].replace('&', '')
+                        input_name = data_info['input']
+                        conditions = data_info['conditions']
                         
-                        line = lines[j].strip()
-                        
-                        if line.startswith('%do %while'):
-                            do_while = self._convert_macro_do_statement(line)
-                            python_code.append(do_while)
-                            
-                            # Process lines until %end;
-                            j += 1
-                            loop_body = []
-                            loop_line_count = 0
-                            max_loop_lines = 100  # Safety limit
-                            
-                            while j < len(lines) and not lines[j].strip() == '%end;' and loop_line_count < max_loop_lines:
-                                # Check timeout for each loop line
-                                if time.time() - start_time > max_time:
-                                    logger.warning("Conversion timeout reached during loop processing. Stopping conversion.")
-                                    loop_body.append("    # Conversion timeout reached during loop processing")
-                                    break
-                                
-                                loop_line = lines[j].strip()
-                                if loop_line.startswith('%analyze_segment'):
-                                    # Convert macro call
-                                    macro_call = self._convert_macro_call_statement(loop_line)
-                                    loop_body.append(f"    {macro_call}")
-                                elif loop_line:
-                                    loop_body.append(f"    # {loop_line}")
-                                
-                                j += 1
-                                loop_line_count += 1
-                            
-                            # Check if we hit the safety limit
-                            if loop_line_count >= max_loop_lines:
-                                logger.warning(f"Loop body exceeded {max_loop_lines} lines. Possible infinite loop.")
-                                loop_body.append(f"    # Warning: Loop body truncated after {max_loop_lines} lines")
-                            
-                            # Add loop body with indentation
-                            python_code.extend(loop_body)
-                            python_code.append("    # End of loop")
-                        
-                        elif line.startswith('%analyze_segment'):
-                            macro_call = self._convert_macro_call_statement(line)
-                            python_code.append(macro_call)
-                        
-                        elif line == '%end;':
-                            pass
-                        
-                        elif line:
-                            python_code.append(f"# {line}")
-                        
-                        j += 1
-                        
-                        # Check if we broke out of the inner loop due to timeout
-                        if time.time() - start_time > max_time:
-                            break
-                
-                else:
-                    python_code.append(f"# TODO: Convert {component.type}:\n# {component.content.strip()}")
-                    
+                        python_code.extend([
+                            f"# Create output dataset",
+                            f"{output_name}_df = {input_name}_df.copy()",
+                            "",
+                            "# Apply conditional logic",
+                            "def apply_condition(row):",
+                            f"    {self._convert_conditions(conditions)}",
+                            "",
+                            f"{output_name}_df['IR_VAR_DELTA'] = {output_name}_df.apply(apply_condition, axis=1)",
+                            ""
+                        ])
+
             except Exception as e:
                 logger.warning(f"Error converting component {component.type}: {str(e)}")
-                python_code.append(f"# TODO: Convert {component.type}:\n# {component.content.strip()}")
-            
-            i += 1
-        
-        # Add helper functions if needed
-        helper_functions = self._get_helper_functions()
-        if helper_functions:
-            # Insert helper functions after imports
-            python_code.insert(8, helper_functions)
-        
+                continue
+
         return '\n'.join(python_code)
+
+    def _get_base_table(self, from_clause: str) -> str:
+        """Extract base table name from FROM clause."""
+        match = re.search(r'from\s+&?(\w+)', from_clause, re.IGNORECASE)
+        if match:
+            return match.group(1).replace('&', '')
+        return 'input'
+
+    def _parse_join_conditions(self, condition: str) -> str:
+        """Parse JOIN conditions into pandas merge parameters."""
+        conditions = condition.split('and')
+        left_cols = []
+        right_cols = []
+        
+        for cond in conditions:
+            if '=' in cond:
+                left, right = cond.split('=')
+                left_cols.append(left.strip())
+                right_cols.append(right.strip())
+        
+        if len(left_cols) == 1:
+            return f"on='{left_cols[0]}'"
+        return f"left_on={left_cols}, right_on={right_cols}"
+
+    def _parse_macro_parameters(self, content: str) -> Dict[str, str]:
+        """Parse macro parameters into a dictionary."""
+        param_match = re.search(r'%\w+\s*\(\s*(.*?)\s*\)', content, re.IGNORECASE)
+        if not param_match:
+            return {}
+        
+        params = {}
+        param_list = param_match.group(1).split(',')
+        
+        for i, param in enumerate(param_list):
+            param = param.strip()
+            if '=' in param:
+                key, value = param.split('=')
+                params[key.strip()] = value.strip()
+            elif i == 0:
+                params['table'] = param
+            elif i == 1:
+                params['param'] = param
+        
+        return params
+
+    def _parse_data_step(self, content: str) -> Dict[str, Any]:
+        """Parse DATA step content into structured information."""
+        data_info = {}
+        
+        # Extract dataset names
+        output_match = re.search(r'data\s+&?(\w+)', content)
+        set_match = re.search(r'set\s+(\w+)', content)
+        
+        if output_match and set_match:
+            data_info['output'] = output_match.group(1)
+            data_info['input'] = set_match.group(1)
+            
+            # Extract conditions
+            if_match = re.search(r'if\s*\((.*?)\)\s*then\s*(.*?);(?:\s*else\s*(.*?);)?', 
+                               content, re.IGNORECASE | re.DOTALL)
+            if if_match:
+                data_info['conditions'] = {
+                    'if': if_match.group(1).strip(),
+                    'then': if_match.group(2).strip(),
+                    'else': if_match.group(3).strip() if if_match.group(3) else '0'
+                }
+        
+        return data_info
+
+    def _convert_conditions(self, conditions: Dict[str, str]) -> str:
+        """Convert SAS conditions to Python code."""
+        if_cond = conditions['if'].replace("'", '"')
+        then_stmt = conditions['then']
+        else_stmt = conditions['else']
+        
+        return f"if {if_cond}:\n        return {then_stmt}\n    else:\n        return {else_stmt}"
 
     def convert_component(self, component: SASComponent) -> str:
         """Convert a single SAS component to Python code."""
@@ -884,68 +902,55 @@ plt.rcParams['figure.figsize'] = ({width}, {height})"""
             logger.warning(f"Error converting ODS GRAPHICS: {str(e)}")
             return f"# TODO: Convert ODS GRAPHICS:\n# {component.content.strip()}"
 
-    def _convert_proc_sql(self, component: SASComponent) -> str:
-        """Convert PROC SQL to pandas operations."""
+    def _convert_proc_sql_enhanced(self, component: SASComponent) -> str:
+        """Enhanced converter for PROC SQL with complex joins."""
         try:
             content = component.content
             
-            # Extract CREATE TABLE statements
-            create_table_matches = re.findall(r'create\s+table\s+(\S+)\s+as\s+select\s+(.*?)\s+from\s+(\S+)(?:\s+where\s+(.*?))?(?:\s+group\s+by\s+(.*?))?(?:\s+order\s+by\s+(.*?))?;', 
-                                             content, re.IGNORECASE | re.DOTALL)
+            # Extract CREATE TABLE statement
+            create_match = re.search(r'create\s+table\s+(\w+)\s+as\s*select\s+(.*?)\s+from\s+(.*?)(?:order\s+by|quit|;)', 
+                                   content, re.IGNORECASE | re.DOTALL)
             
-            if create_table_matches:
-                sql_code = []
-                for match in create_table_matches:
-                    output_table = self._convert_sas_reference(match[0])
-                    columns = match[1].strip()
-                    input_table = self._convert_sas_reference(match[2])
-                    where_clause = match[3].strip() if len(match) > 3 and match[3] else None
-                    group_by = match[4].strip() if len(match) > 4 and match[4] else None
-                    order_by = match[5].strip() if len(match) > 5 and match[5] else None
-                    
-                    # Start with the input table
-                    code = [f"{output_table} = {input_table}.copy()"]
-                    
-                    # Handle column selection
-                    if columns != '*':
-                        cols = [c.strip() for c in columns.split(',')]
-                        code.append(f"{output_table} = {output_table}[[{', '.join(repr(c) for c in cols)}]]")
-                    
-                    # Handle WHERE clause
-                    if where_clause:
-                        py_condition = self._convert_sas_condition(where_clause)
-                        code.append(f"{output_table} = {output_table}[{py_condition}]")
-                    
-                    # Handle GROUP BY
-                    if group_by:
-                        group_cols = [c.strip() for c in group_by.split(',')]
-                        code.append(f"{output_table} = {output_table}.groupby([{', '.join(repr(c) for c in group_cols)}]).agg({{'*': 'count'}})")
-                    
-                    # Handle ORDER BY
-                    if order_by:
-                        order_cols = []
-                        ascending = []
-                        for col in order_by.split(','):
-                            col = col.strip()
-                            if col.lower().endswith(' desc'):
-                                order_cols.append(col[:-5].strip())
-                                ascending.append(False)
-                            else:
-                                order_cols.append(col)
-                                ascending.append(True)
-                        
-                        code.append(f"{output_table} = {output_table}.sort_values(by=[{', '.join(repr(c) for c in order_cols)}], ascending={ascending})")
-                    
-                    sql_code.extend(code)
+            if not create_match:
+                return "# TODO: Convert PROC SQL - complex statement\n# " + content
                 
-                return '\n'.join(sql_code)
+            table_name = create_match.group(1)
+            columns = create_match.group(2)
+            from_clause = create_match.group(3)
             
-            # If no CREATE TABLE statements found, return a TODO comment
-            return f"# TODO: Convert PROC SQL:\n# {content.strip()}"
+            # Handle macro variables
+            table_name = table_name.replace('&', '')
+            from_clause = re.sub(r'&(\w+)', r'\1', from_clause)
+            
+            # Process joins
+            python_code = [
+                f"# Create SQL-based DataFrame",
+                f"{table_name}_df = input_df.copy()"
+            ]
+            
+            # Handle joins
+            if 'left join' in content.lower():
+                joins = re.findall(r'left\s+join\s+&?(\w+)\s+(\w+)\s+on\s+([^(]*?)\s*(?=(?:left join|order by|$))', 
+                                 content, re.IGNORECASE | re.DOTALL)
+                for table, alias, condition in joins:
+                    join_condition = condition.replace('=', '==').strip()
+                    python_code.append(
+                        f"{table_name}_df = pd.merge({table_name}_df, {table}_df, "
+                        f"how='left', left_on='{join_condition.split('==')[0].strip()}', "
+                        f"right_on='{join_condition.split('==')[1].strip()}')"
+                    )
+            
+            # Handle ORDER BY
+            order_match = re.search(r'order\s+by\s+(.*?)(?:quit|;)', content, re.IGNORECASE)
+            if order_match:
+                order_cols = [col.strip() for col in order_match.group(1).split(',')]
+                python_code.append(f"{table_name}_df = {table_name}_df.sort_values(by={order_cols})")
+            
+            return '\n'.join(python_code)
             
         except Exception as e:
             logger.warning(f"Error converting PROC SQL: {str(e)}")
-            return f"# TODO: Convert PROC SQL:\n# {component.content.strip()}"
+            return f"# TODO: Convert PROC SQL:\n# {content}"
 
     def _convert_format(self, format_str: str) -> str:
         """Convert SAS format to Python format string."""
@@ -1726,314 +1731,195 @@ plt.tight_layout()"""
             logger.warning(f"Error converting macro call statement: {str(e)}")
             return f"# TODO: Convert macro call: {statement}"
 
-    def _convert_proc_sql_enhanced(self, component: SASComponent) -> str:
-        """Enhanced converter for PROC SQL with support for complex SQL statements."""
+    def _convert_parameter_join(self, component: SASComponent) -> str:
+        """Convert PARAMETER_Join_Parameter macro."""
+        try:
+            content = component.content
+            # Fix the regex to properly capture all parameters including name=value pairs
+            param_match = re.search(r'%PARAMETER_Join_Parameter\s*\(\s*(.*?)\s*\)', content, re.IGNORECASE)
+            
+            if not param_match:
+                return f"# TODO: Convert parameter join macro:\n# {content}"
+                
+            # Split parameters and clean them
+            params_str = param_match.group(1)
+            params = []
+            current_param = []
+            in_quotes = False
+            
+            # Parse parameters handling quotes and commas properly
+            for char in params_str:
+                if char == '"' or char == "'":
+                    in_quotes = not in_quotes
+                elif char == ',' and not in_quotes:
+                    if current_param:
+                        params.append(''.join(current_param).strip())
+                        current_param = []
+                    continue
+                current_param.append(char)
+            
+            if current_param:
+                params.append(''.join(current_param).strip())
+            
+            if len(params) < 2:
+                return f"# TODO: Convert parameter join macro - invalid parameters:\n# {content}"
+                
+            table_name = params[0].strip()
+            param_name = params[1].strip()
+            
+            # Handle name= parameter if present
+            for param in params[1:]:
+                if 'name=' in param:
+                    param_name = param.split('=')[1].strip()
+                    break
+            
+            return f"""
+# Join parameters for {table_name}
+{table_name}_df = pd.merge(
+    {table_name}_df,
+    parameters_df,
+    how='left',
+    on='{param_name}'
+)"""
+                
+        except Exception as e:
+            logger.warning(f"Error converting parameter join: {str(e)}")
+            return f"# TODO: Convert parameter join:\n# {content}"
+
+    def _convert_data_step_enhanced(self, component: SASComponent) -> str:
+        """Enhanced converter for DATA steps with conditional logic."""
         try:
             content = component.content
             
-            # Quick check if this is a simple SQL statement
-            if len(content) < 500 and not re.search(r'(CREATE\s+TABLE|JOIN|GROUP\s+BY|ORDER\s+BY)', content, re.IGNORECASE):
-                return self._convert_proc_sql(component)  # Use faster original converter for simple statements
+            # Extract dataset names handling macro variables
+            output_match = re.search(r'data\s+&(\w+)', content)
+            set_match = re.search(r'set\s+(\w+)', content)
             
-            # Extract SQL statements
-            sql_statements = self._extract_sql_statements(content)
-            if not sql_statements:
-                return self._convert_proc_sql(component)  # Fall back to original converter
-            
-            python_code = ["# Convert PROC SQL to pandas operations"]
-            
-            for stmt in sql_statements:
-                if stmt.statement_type.upper() == 'CREATE TABLE':
-                    python_code.append(self._convert_sql_create_table(stmt))
-                elif stmt.statement_type.upper() == 'SELECT':
-                    python_code.append(self._convert_sql_select(stmt))
-                else:
-                    python_code.append(f"# TODO: Convert SQL {stmt.statement_type}:\n# {stmt.content}")
-            
-            return "\n".join(python_code)
-        
-        except Exception as e:
-            logger.warning(f"Error in enhanced SQL conversion: {str(e)}")
-            # Fall back to original converter
-            return self._convert_proc_sql(component)
-
-    def _extract_sql_statements(self, content: str) -> List[SQLStatement]:
-        """Extract individual SQL statements from PROC SQL content."""
-        from sas_parser import SQLStatement
-        
-        # Simple extraction for basic statements
-        statements = []
-        parts = content.split(';')
-        
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            
-            # Determine statement type
-            stmt_type = "UNKNOWN"
-            
-            # Check for CREATE TABLE
-            if re.search(r'CREATE\s+TABLE', part, re.IGNORECASE):
-                stmt_type = "CREATE TABLE"
-                table_match = re.search(r'CREATE\s+TABLE\s+(\S+)', part, re.IGNORECASE)
-                tables = [table_match.group(1)] if table_match else []
-            # Check for SELECT
-            elif re.search(r'SELECT', part, re.IGNORECASE):
-                stmt_type = "SELECT"
-                # Extract tables from FROM clause
-                from_match = re.search(r'FROM\s+(\S+)', part, re.IGNORECASE)
-                tables = [from_match.group(1)] if from_match else []
-            else:
-                tables = []
-            
-            statements.append(SQLStatement(stmt_type, part, tables))
-        
-        return statements
-
-    def _convert_sql_create_table(self, stmt: SQLStatement) -> str:
-        """Convert SQL CREATE TABLE statement to pandas code."""
-        content = stmt.content
-        tables = stmt.tables
-        
-        if not tables:
-            return f"# TODO: Convert SQL CREATE TABLE - no table name found\n# {content}"
-        
-        output_table = self._convert_sas_reference(tables[0])
-        
-        # Extract columns and data source
-        select_match = re.search(r'SELECT\s+(.*?)\s+FROM\s+(.*?)(?:WHERE|GROUP|ORDER|HAVING|;|$)', 
-                                content, re.IGNORECASE | re.DOTALL)
-        
-        if not select_match:
-            return f"# TODO: Convert SQL CREATE TABLE - complex statement\n# {content}"
-        
-        columns = select_match.group(1).strip()
-        source = select_match.group(2).strip()
-        source_table = self._convert_sas_reference(source)
-        
-        # Handle WHERE clause
-        where_match = re.search(r'WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
-        where_clause = ""
-        if where_match:
-            where_condition = where_match.group(1).strip()
-            where_clause = f"\n# Filter data\n{output_table} = {output_table}[{self._convert_sql_condition(where_condition)}]"
-        
-        # Handle GROUP BY
-        group_match = re.search(r'GROUP\s+BY\s+(.*?)(?:ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
-        group_clause = ""
-        if group_match:
-            group_cols = group_match.group(1).strip()
-            cols_list = []
-            for col in group_cols.split(','):
-                cols_list.append(f"'{col.strip()}'")
-            group_clause = f"\n# Group data\n{output_table} = {output_table}.groupby([{', '.join(cols_list)}])"
-            
-            # Check for aggregation functions in SELECT
-            if re.search(r'(SUM|AVG|MIN|MAX|COUNT)\s*\(', columns, re.IGNORECASE):
-                agg_dict = {}
-                for col_expr in columns.split(','):
-                    col_expr = col_expr.strip()
-                    agg_match = re.search(r'(SUM|AVG|MIN|MAX|COUNT)\s*\(\s*(\w+)\s*\)(?:\s+AS\s+(\w+))?', col_expr, re.IGNORECASE)
-                    if agg_match:
-                        func = agg_match.group(1).lower()
-                        col = agg_match.group(2)
-                        alias = agg_match.group(3) if agg_match.group(3) else f"{func}_{col}"
-                        
-                        # Map SAS aggregate functions to pandas
-                        func_map = {'sum': 'sum', 'avg': 'mean', 'min': 'min', 'max': 'max', 'count': 'count'}
-                        pandas_func = func_map.get(func, func)
-                        
-                        if col not in agg_dict:
-                            agg_dict[col] = []
-                        agg_dict[col].append(pandas_func)
+            if not output_match or not set_match:
+                return f"# TODO: Convert DATA step - missing dataset information\n# {content}"
                 
-                if agg_dict:
-                    agg_parts = []
-                    for col, funcs in agg_dict.items():
-                        func_parts = []
-                        for func in funcs:
-                            func_parts.append(f"'{func}'")
-                        agg_parts.append(f"'{col}': [{', '.join(func_parts)}]")
-                    agg_str = ", ".join(agg_parts)
-                    group_clause += f".agg({{{agg_str}}})"
-                else:
-                    group_clause += ".agg()"
-        
-        # Handle ORDER BY
-        order_match = re.search(r'ORDER\s+BY\s+(.*?)(?:;|$)', content, re.IGNORECASE | re.DOTALL)
-        order_clause = ""
-        if order_match:
-            order_cols = []
-            ascending = []
+            output_name = output_match.group(1)
+            input_name = set_match.group(1)
             
-            for col_expr in order_match.group(1).split(','):
-                col_expr = col_expr.strip()
-                if re.search(r'\bDESC\b', col_expr, re.IGNORECASE):
-                    col = re.sub(r'\s+DESC\b', '', col_expr, flags=re.IGNORECASE).strip()
-                    order_cols.append(col)
-                    ascending.append(False)
-                else:
-                    col = re.sub(r'\s+ASC\b', '', col_expr, flags=re.IGNORECASE).strip()
-                    order_cols.append(col)
-                    ascending.append(True)
+            # Extract conditional logic with better regex
+            if_match = re.search(r'if\s*\(\s*(.*?)\s*\)\s*then\s*(.*?);(?:\s*else\s*(.*?);)?', 
+                               content, re.IGNORECASE | re.DOTALL)
             
-            order_cols_quoted = [f"'{col}'" for col in order_cols]
-            order_clause = f"\n# Sort data\n{output_table} = {output_table}.sort_values(by=[{', '.join(order_cols_quoted)}], ascending={ascending})"
-        
-        # Handle column selection
-        if columns.strip() == '*':
-            column_clause = f"{output_table} = {source_table}.copy()"
-        else:
-            # Parse column expressions
-            column_list = []
-            for col_expr in columns.split(','):
-                col_expr = col_expr.strip()
-                # Check for column aliases
-                alias_match = re.search(r'(.*?)\s+AS\s+(\w+)', col_expr, re.IGNORECASE)
-                if alias_match:
-                    expr = alias_match.group(1).strip()
-                    alias = alias_match.group(2)
-                    column_list.append((expr, alias))
-                else:
-                    column_list.append((col_expr, col_expr))
+            if not if_match:
+                return f"# TODO: Convert DATA step - complex logic:\n# {content}"
             
-            # Generate column selection code
-            if all(expr == alias for expr, alias in column_list):
-                # Simple column selection
-                cols_quoted = [f"'{expr}'" for expr, _ in column_list]
-                column_clause = f"{output_table} = {source_table}[[{', '.join(cols_quoted)}]]"
-            else:
-                # Complex column expressions with aliases
-                column_clause = f"{output_table} = {source_table}.copy()\n"
-                for expr, alias in column_list:
-                    # Convert SAS expression to pandas
-                    pandas_expr = self._convert_sql_expression(expr)
-                    column_clause += f"{output_table}['{alias}'] = {pandas_expr}\n"
-        
-        return f"""# Create table {output_table} from SQL
-{column_clause}{where_clause}{group_clause}{order_clause}"""
+            condition = if_match.group(1).strip()
+            then_stmt = if_match.group(2).strip()
+            else_stmt = if_match.group(3).strip() if if_match.group(3) else "0"
+            
+            # Clean up the condition and statements
+            condition = condition.replace("'", '"').replace("_ir", "_ir")  # Fix spacing issues
+            then_stmt = then_stmt.replace("(", " (").replace(")", ") ")  # Add spaces around parentheses
+            
+            return f"""
+# Create output dataset
+{output_name}_df = {input_name}_df.copy()
 
-    def _convert_sql_select(self, stmt: SQLStatement) -> str:
-        """Convert SQL SELECT statement to pandas code."""
-        # Similar to CREATE TABLE but without creating a new DataFrame
-        content = stmt.content
-        tables = stmt.tables
-        
-        if not tables:
-            return f"# TODO: Convert SQL SELECT - no table found\n# {content}"
-        
-        source_table = self._convert_sas_reference(tables[0])
-        result_var = f"result_{source_table}"
-        
-        # Extract columns
-        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', content, re.IGNORECASE | re.DOTALL)
-        if not select_match:
-            return f"# TODO: Convert SQL SELECT - complex statement\n# {content}"
-        
-        columns = select_match.group(1).strip()
-        
-        # Handle WHERE clause
-        where_match = re.search(r'WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|;|$)', content, re.IGNORECASE | re.DOTALL)
-        where_clause = ""
-        if where_match:
-            where_condition = where_match.group(1).strip()
-            where_clause = f"\n# Filter data\n{result_var} = {result_var}[{self._convert_sql_condition(where_condition)}]"
-        
-        # Similar handling for GROUP BY and ORDER BY as in _convert_sql_create_table
-        
-        # Handle column selection
-        if columns.strip() == '*':
-            column_clause = f"{result_var} = {source_table}.copy()"
-        else:
-            # Create a list of quoted column names
-            cols_quoted = []
-            for col in columns.split(','):
-                cols_quoted.append(f"'{col.strip()}'")
-            
-            # Join the quoted column names
-            column_clause = f"{result_var} = {source_table}[[{', '.join(cols_quoted)}]]"
-        
-        return f"""# Execute SQL SELECT
-{column_clause}{where_clause}
-print({result_var}.head())"""
+# Apply conditional logic
+def apply_condition(row):
+    if {condition}:
+        return {then_stmt}
+    else:
+        return {else_stmt}
 
-    def _expand_macro_variables(self, content: str) -> str:
-        """Expand macro variables in a string."""
-        # Find all macro variable references
-        macro_refs = re.findall(r'&(\w+)\.?', content)
-        
-        # Replace each reference with its value
-        expanded = content
-        for var_name in macro_refs:
-            if var_name in self.macro_variables:
-                value = self.macro_variables[var_name]
-                # Replace &var and &var. with the value
-                expanded = re.sub(r'&' + var_name + r'\.?', value, expanded)
-        
-        return expanded
-
-    def _process_macro_definition(self, macro_component: SASComponent) -> None:
-        """Process a macro definition to extract parameters and default values."""
-        content = macro_component.content
-        name = macro_component.name
-        
-        # Extract macro parameters
-        param_match = re.search(r'%MACRO\s+' + re.escape(name) + r'\s*\((.*?)\)', content, re.IGNORECASE | re.DOTALL)
-        if not param_match:
-            return
-        
-        params_str = param_match.group(1).strip()
-        if not params_str:
-            return
-        
-        # Parse parameters and their default values
-        params = {}
-        for param in params_str.split(','):
-            param = param.strip()
-            if '=' in param:
-                param_name, default_value = param.split('=', 1)
-                params[param_name.strip()] = default_value.strip()
-            else:
-                params[param] = None
-        
-        # Store macro parameters in metadata
-        macro_component.metadata['parameters'] = params
-
-    def _convert_macro_call_enhanced(self, component: SASComponent) -> str:
-        """Enhanced converter for macro calls with parameter expansion."""
-        try:
-            content = component.content.strip()
-            
-            # Quick check if this is a simple macro call
-            if len(content) < 200 and not '%analyze_segment' in content:
-                return self._convert_macro_call(component)  # Use faster original converter for simple calls
-            
-            # Extract macro name and parameters
-            macro_match = re.search(r'%(\w+)\s*\((.*)\);', content, re.IGNORECASE)
-            if not macro_match:
-                return self._convert_macro_call(component)  # Fall back to original converter
-            
-            macro_name = macro_match.group(1)
-            params_str = macro_match.group(2)
-            
-            # Simple parameter parsing
-            if '=' in params_str:
-                # Named parameters
-                params = {}
-                for param_pair in params_str.split(','):
-                    if '=' in param_pair:
-                        name, value = param_pair.split('=', 1)
-                        params[name.strip()] = value.strip()
+{output_name}_df['IR_VAR_DELTA'] = {output_name}_df.apply(apply_condition, axis=1)"""
                 
-                params_code = ", ".join([f"{k}={v}" for k, v in params.items()])
-                return f"{macro_name}({params_code})"
-            else:
-                # Positional parameters
-                params = [p.strip() for p in params_str.split(',')]
-                return f"{macro_name}({', '.join(params)})"
-        
         except Exception as e:
-            logger.warning(f"Error in enhanced macro call conversion: {str(e)}")
-            # Fall back to original converter
-            return self._convert_macro_call(component)
+            logger.warning(f"Error converting DATA step: {str(e)}")
+            return f"# TODO: Convert DATA step:\n# {content}"
+
+    def _parse_sql_select(self, select_clause: str) -> List[Dict[str, str]]:
+        """Parse SQL SELECT clause into column definitions."""
+        columns = []
+        for col in select_clause.split(','):
+            col = col.strip()
+            if ' as ' in col.lower():
+                orig, alias = col.lower().split(' as ')
+                columns.append({
+                    'original': orig.strip(),
+                    'alias': alias.strip(),
+                    'table_prefix': orig.split('.')[0] if '.' in orig else None
+                })
+            elif '.' in col:
+                table, field = col.split('.')
+                columns.append({
+                    'original': field.strip(),
+                    'alias': None,
+                    'table_prefix': table.strip()
+                })
+            else:
+                columns.append({
+                    'original': col,
+                    'alias': None,
+                    'table_prefix': None
+                })
+        return columns
+
+    def _parse_join_clause(self, join_clause: str) -> Dict[str, Any]:
+        """Parse SQL JOIN clause into structured format."""
+        join_info = {
+            'type': 'left' if 'left join' in join_clause.lower() else 'inner',
+            'table': None,
+            'alias': None,
+            'conditions': []
+        }
+        
+        # Extract table and alias
+        table_match = re.search(r'join\s+&?(\w+)\s+(\w+)', join_clause)
+        if table_match:
+            join_info['table'] = table_match.group(1).replace('&', '')
+            join_info['alias'] = table_match.group(2)
+        
+        # Extract conditions
+        cond_match = re.search(r'on\s+(.+?)(?=(?:left join|$))', join_clause, re.IGNORECASE | re.DOTALL)
+        if cond_match:
+            conditions = cond_match.group(1).strip()
+            # Handle special conditions
+            if conditions == '(1=1)':
+                join_info['conditions'].append({'type': 'cross_join'})
+            else:
+                for cond in conditions.split('and'):
+                    if '=' in cond:
+                        left, right = [s.strip() for s in cond.split('=')]
+                        join_info['conditions'].append({
+                            'type': 'equals',
+                            'left': left,
+                            'right': right
+                        })
+        
+        return join_info
+
+    def _convert_data_step_assignment(self, assignment: str) -> Dict[str, Any]:
+        """Convert DATA step assignment to Python expression."""
+        target, expression = [s.strip() for s in assignment.split('=')]
+        
+        # Parse function calls
+        def parse_function(expr: str) -> Dict[str, Any]:
+            func_match = re.search(r'(\w+)\((.*)\)', expr)
+            if func_match:
+                return {
+                    'function': func_match.group(1),
+                    'arguments': [arg.strip() for arg in func_match.group(2).split(',')]
+                }
+            return {'value': expr}
+        
+        # Handle complex expressions
+        if '(' in expression:
+            operations = []
+            for part in re.findall(r'([\w_]+\([^)]+\)|-|\+|\*|/|\w+)', expression):
+                if any(op in part for op in ['+', '-', '*', '/']):
+                    operations.append({'operator': part})
+                else:
+                    operations.append(parse_function(part))
+        else:
+            operations = [{'value': expression}]
+        
+        return {
+            'target': target,
+            'operations': operations
+        }

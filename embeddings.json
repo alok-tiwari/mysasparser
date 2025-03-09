@@ -1,0 +1,6 @@
+[
+  {
+    "file": "./mock_data/analysis.sas",
+    "type": "%LET",
+    "content": "%let alpha = 0.05;",
+    "embedding": 
