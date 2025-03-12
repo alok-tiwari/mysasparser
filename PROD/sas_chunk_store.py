@@ -51,21 +51,45 @@ class SASChunkStore:
         return chunks
 
     def prepare_chunks(self, components: List[SASComponent]) -> List[Dict[str, Any]]:
-        """
-        Prepare chunks using LabVectorStore's chunking method if available,
-        otherwise use default chunking.
-        """
-        try:
-            # Check if LabVectorStore provides chunking
-            if hasattr(self.store, 'prepare_chunks'):
-                logger.info("Using LabVectorStore chunking method")
-                return self.store.prepare_chunks(components)
-            else:
-                logger.info("Using default chunking method")
-                return self._prepare_default_chunks(components)
-        except Exception as e:
-            logger.warning(f"Error in LabVectorStore chunking, falling back to default: {str(e)}")
-            return self._prepare_default_chunks(components)
+        """Convert SAS components to chunks format for Lab Vector Store."""
+        chunks = []
+        for component in components:
+            # Extract parent and nested info safely
+            parent_info = component.metadata.get("parent_info", {
+                "parent_name": None,
+                "parent_type": None
+            })
+            nested_info = component.metadata.get("nested_info", {
+                "has_nested": False,
+                "nested_count": 0,
+                "nested_names": []
+            })
+
+            chunk = {
+                "content": component.content,
+                "metadata": {
+                    # Base metadata
+                    "type": component.type,
+                    "name": component.name,
+                    "line_start": component.line_start,
+                    "line_end": component.line_end,
+                    "file_path": component.metadata.get("file_path", ""),
+                    "source_file": component.metadata.get("source_file", ""),
+                    
+                    # Parent/Nested relationships
+                    "parent_info": parent_info,
+                    "nested_info": nested_info,
+                    
+                    # Original indentation
+                    "original_indentation": component.metadata.get("original_indentation", 0),
+                    
+                    # Any other metadata
+                    **component.metadata
+                }
+            }
+            chunks.append(chunk)
+        
+        return chunks
 
     def store_components(self, components: List[SASComponent]) -> bool:
         """

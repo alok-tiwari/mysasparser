@@ -24,22 +24,30 @@ class SASComponent:
 class SASParser:
     """Parser for SAS code components with complete line tracking."""
     
+    # Class-level configuration
+    INCLUDE_COMMENTS = False  # Set default here
+    
     def __init__(self):
         """Initialize the SAS parser."""
         # Base patterns with priority order
         self.base_patterns = {
-            'PROC_SQL': (r'proc\s+sql\s*;.*?(?:quit|run);', 10),
-            'MACRO': (r'%macro\s+([a-zA-Z_]\w*)(?:\s*\([^)]*\))?\s*;.*?%mend\s*(?:\1)?\s*;', 9),
-            'PROC': (r'proc\s+(\w+).*?(?:run|quit);', 8),
-            'DATA': (r'data\s+([^;]+);.*?run;', 7),
-            'LIBNAME': (r'libname\s+([^;]+);', 6),
+            'PROC_SQL': (r'proc\s+sql\s*;(?:(?!/\*|\*/).)*?(?:quit|run)\s*;', 10),  # Better comment handling
+            'MACRO': (r'%macro\s+([a-zA-Z_]\w*)(?:\s*\([^)]*\))?\s*;.*?%mend\s*(?:\1)?\s*;', 9),  # Better param handling
+            'PROC': (r'proc\s+(\w+)(?:\s+[^;]*)?;.*?(?:run|quit)\s*;', 8),  # Better PROC options
+            'DATA': (r'data\s+([^;]+?)(?:\s+[^;]*)?;.*?run\s*;', 7),  # Better dataset options
+            'LIBNAME': (r'libname\s+([a-zA-Z_]\w*)\s+[^;]+;', 6),  # Stricter libname
             'INCLUDE': (r'%include\s+([^;]+);', 5),
-            'LET': (r'%let\s+([^;]+);', 4),
-            'BLOCK_COMMENT': (r'/\*(?:[^*]|\*(?!/))*\*/', 3),  # Multiline /* ... */
-            'LINE_COMMENT': (r'^\s*\*[^;]*;', 2),              # Single line * ...;
-            'OPTIONS': (r'options\s+[^;]+;', 1),
-            'MEND': (r'%mend\s*;', 8),  # Add standalone MEND pattern
+            'LET': (r'%let\s+([a-zA-Z_]\w*)\s*=\s*[^;]+;', 4)  # Stricter macro var
         }
+        
+        # Only add comment patterns if INCLUDE_COMMENTS is True
+        if self.INCLUDE_COMMENTS:
+            self.base_patterns.update({
+                'BLOCK_COMMENT': (r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', 3),
+                'LINE_COMMENT': (r'^\s*\*[^;]*;', 2)
+            })
+            
+        self.base_patterns['OPTIONS'] = (r'options\s+[^;]+;', 1)
 
         # Advanced PROC patterns
         self.proc_patterns = {
@@ -124,6 +132,7 @@ class SASParser:
         """Enhanced parse content with macro validation."""
         components = []
         line_offset = 1
+        macro_stack = []  # Initialize macro stack here
         
         # Track file-level metadata
         file_metadata = {
@@ -137,23 +146,56 @@ class SASParser:
         
         # Find all matches for all patterns
         matches = []
+        comment_matches = []  # Separate list for comments
+        
         for comp_type, (pattern, priority) in self.compiled_patterns.items():
+            if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
+                if self.INCLUDE_COMMENTS:
+                    # Store comments separately
+                    for match in pattern.finditer(content):
+                        comment_matches.append((match.start(), match.end(), match.group(0)))
+                continue
+            
             for match in pattern.finditer(content):
                 start, end = match.span()
                 matches.append((start, end, comp_type, priority, match))
         
-        # Sort by start position and priority
-        matches.sort(key=lambda x: (x[0], -x[3]))
+        # Sort matches by position
+        matches.sort(key=lambda x: x[0])
         
-        # Process matches while handling overlaps
-        used_ranges = set()
-        macro_stack = []  # Track macro nesting
-        
-        for start, end, comp_type, _, match in matches:
-            if any(start < r[1] and end > r[0] for r in used_ranges):
-                continue
-                
-            line_start = content.count('\n', 0, start) + line_offset
+        # Process matches and associate comments
+        for start, end, comp_type, priority, match in matches:
+            # Find any comments that belong to this component
+            associated_comments = []
+            last_comment_end = 0
+            
+            if self.INCLUDE_COMMENTS:
+                for c_start, c_end, c_content in comment_matches:
+                    # Check if this comment is after the last one we processed
+                    # and before the current component
+                    if c_start > last_comment_end and c_end <= start:
+                        # Check if there's only whitespace or newlines between comments
+                        between_comments = content[last_comment_end:c_start].strip()
+                        between_component = content[c_end:start].strip()
+                        
+                        if (not between_comments or between_comments.isspace()) and \
+                           (not between_component or between_component.isspace()):
+                            associated_comments.append(c_content)
+                            last_comment_end = c_end
+            
+            # Get component content including all comments
+            if associated_comments and self.INCLUDE_COMMENTS:
+                # Join all comments and the component with proper newlines
+                all_content = associated_comments + [match.group(0)]
+                component_content = '\n'.join(all_content)
+                # Get line start from first comment
+                first_comment_start = content.find(associated_comments[0])
+                line_start = content.count('\n', 0, first_comment_start) + line_offset
+            else:
+                component_content = match.group(0)
+                line_start = content.count('\n', 0, start) + line_offset
+            
+            # Fix line_end calculation
             line_end = content.count('\n', 0, end) + line_offset
             
             # Handle macro components
@@ -162,7 +204,7 @@ class SASParser:
                 macro_stack.append(macro_name)
             elif comp_type == 'MEND':
                 if macro_stack:
-                    macro_stack.pop()  # Pop the last macro
+                    macro_stack.pop()
             
             # Special handling for comments
             if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
@@ -172,18 +214,15 @@ class SASParser:
                     content_lines
                 )
                 
-                enhanced_metadata = {
-                    **file_metadata.copy(),
-                    **comment_metadata,
-                    "parent_info": {
-                        "parent_name": None,
-                        "parent_type": None
-                    },
-                    "nested_info": {
-                        "has_nested": False,
-                        "nested_count": 0,
-                        "nested_names": []
-                    }
+                enhanced_metadata = self._create_base_metadata(file_metadata)
+                enhanced_metadata["parent_info"] = {
+                    "parent_name": None,
+                    "parent_type": None
+                }
+                enhanced_metadata["nested_info"] = {
+                    "has_nested": False,
+                    "nested_count": 0,
+                    "nested_names": []
                 }
                 
                 component = SASComponent(
@@ -191,13 +230,13 @@ class SASParser:
                     name=f"comment_{line_start}",
                     content=preserved_content,
                     line_start=line_start,
-                    line_end=line_end,
+                    line_end=line_start,
                     metadata=enhanced_metadata
                 )
-                
+            
             else:
                 # Regular component handling (existing code)
-                component_lines = content_lines[line_start-1:line_end]
+                component_lines = content_lines[line_start-1:line_start]
                 if component_lines:
                     indents = [len(line) - len(line.lstrip()) 
                               for line in component_lines if line.strip()]
@@ -207,7 +246,7 @@ class SASParser:
                                          for line in component_lines]
                     component_content = '\n'.join(component_lines)
                 else:
-                    component_content = match.group(0)
+                    component_content = component_content
                 
                 # Extract component name
                 name = ''
@@ -218,23 +257,24 @@ class SASParser:
                         name = 'unnamed'
                 
                 # Add macro context to metadata
+                enhanced_metadata = self._create_base_metadata(file_metadata)
                 if macro_stack:
                     enhanced_metadata["macro_context"] = {
                         "current_macro": macro_stack[-1] if macro_stack else None,
                         "macro_depth": len(macro_stack)
                     }
                 
+                # Create component with correct line_end
                 component = SASComponent(
                     type=comp_type,
                     name=name if comp_type != 'MEND' else f'mend_{line_start}',
                     content=component_content,
                     line_start=line_start,
-                    line_end=line_end,
+                    line_end=line_end,  # Use corrected line_end
                     metadata=enhanced_metadata
                 )
             
             components.append(component)
-            used_ranges.add((start, end))
         
         # Validate macro structure
         if macro_stack:
@@ -544,28 +584,22 @@ class SASParser:
         
         return preserved_content, comment_metadata
 
-    def _validate_macro_structure(self, content: str) -> bool:
-        """Validate macro structure and nesting."""
-        macro_stack = []
-        macro_pattern = re.compile(r'(%macro\s+([a-zA-Z_]\w*)|%mend\s*(?:([a-zA-Z_]\w*))?\s*;)', re.IGNORECASE)
-        
-        for match in macro_pattern.finditer(content):
-            statement = match.group(1)
-            if statement.startswith('%macro'):
-                macro_name = match.group(2)
-                macro_stack.append(macro_name)
-            else:  # %mend
-                if not macro_stack:
-                    logger.error("Found %mend without matching %macro")
-                    return False
-                mend_name = match.group(3)
-                if mend_name and mend_name != macro_stack[-1]:
-                    logger.error(f"Mismatched macro name in %mend: expected {macro_stack[-1]}, got {mend_name}")
-                    return False
-                macro_stack.pop()
-        
-        if macro_stack:
-            logger.error(f"Unclosed macros: {macro_stack}")
-            return False
-            
-        return True 
+    def _create_base_metadata(self, file_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Create consistent base metadata structure."""
+        return {
+            **file_metadata.copy(),
+            "parent_info": {
+                "parent_name": None,
+                "parent_type": None
+            },
+            "nested_info": {
+                "has_nested": False,
+                "nested_count": 0,
+                "nested_names": []
+            },
+            "original_indentation": 0,
+            "line_info": {
+                "start": 0,
+                "end": 0
+            }
+        } 

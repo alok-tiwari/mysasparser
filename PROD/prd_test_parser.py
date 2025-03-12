@@ -92,6 +92,78 @@ def test_directory_parsing():
     for comp_type, count in component_types.items():
         print(f"{comp_type}: {count}")
 
+def test_parser_relationships():
+    """Test parent/child relationships and comment handling."""
+    # Test with comments
+    SASParser.INCLUDE_COMMENTS = True  # Set class variable directly
+    parser_with_comments = SASParser()
+    components_with_comments = parser_with_comments.parse_file("prd_mock_data/comprehensive_test.sas")
+    
+    print("\n=== With Comments ===")
+    print(f"Total components: {len(components_with_comments)}")
+    
+    # Test without comments
+    SASParser.INCLUDE_COMMENTS = False  # Set class variable directly
+    parser_no_comments = SASParser()
+    components_no_comments = parser_no_comments.parse_file("prd_mock_data/comprehensive_test.sas")
+    
+    print("\n=== Without Comments ===")
+    print(f"Total components: {len(components_no_comments)}")
+    
+    # Check relationships
+    print("\n=== Relationship Analysis ===")
+    for comp in components_no_comments:
+        print(f"\nComponent: {comp.type} - {comp.name}")
+        print(f"Lines: {comp.line_start}-{comp.line_end}")
+        
+        # Check parent info
+        parent_info = comp.metadata.get('parent_info', {})
+        if parent_info.get('parent_name'):
+            print(f"Parent: {parent_info['parent_name']} ({parent_info['parent_type']})")
+        
+        # Check nested info
+        nested_info = comp.metadata.get('nested_info', {})
+        if nested_info.get('has_nested'):
+            print(f"Nested components: {nested_info['nested_names']}")
+            print(f"Nested count: {nested_info['nested_count']}")
+
+def test_parent_nested_info():
+    """Test parent/nested relationships are correctly captured."""
+    parser = SASParser()
+    
+    # Test with nested macro
+    sas_content = """
+%macro outer;
+    proc sql;
+        select * from table;
+    quit;
+    
+    data test;
+        set input;
+    run;
+%mend;
+"""
+    
+    with open("prd_mock_data/nested_test.sas", "w") as f:
+        f.write(sas_content)
+    
+    components = parser.parse_file("prd_mock_data/nested_test.sas")
+    
+    # Find the macro component
+    macro_comp = next(c for c in components if c.type == 'MACRO')
+    
+    print("\nNested Info:")
+    print(f"Macro has nested: {macro_comp.metadata['nested_info']['has_nested']}")
+    print(f"Nested count: {macro_comp.metadata['nested_info']['nested_count']}")
+    print(f"Nested names: {macro_comp.metadata['nested_info']['nested_names']}")
+    
+    # Find a nested component
+    sql_comp = next(c for c in components if c.type == 'PROC_SQL')
+    
+    print("\nParent Info:")
+    print(f"SQL parent name: {sql_comp.metadata['parent_info']['parent_name']}")
+    print(f"SQL parent type: {sql_comp.metadata['parent_info']['parent_type']}")
+
 def main():
     parser = argparse.ArgumentParser(description='Test SAS Parser, Embeddings, and Vector Store')
     parser.add_argument('--input', default='prd_mock_data', help='Input directory containing SAS files')
@@ -111,6 +183,8 @@ def main():
         test_embeddings()
         test_vector_store()
         test_directory_parsing()
+        test_parser_relationships()
+        test_parent_nested_info()
 
     except Exception as e:
         logger.error(f"Critical error: {str(e)}", exc_info=True)
