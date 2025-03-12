@@ -164,6 +164,31 @@ def test_parent_nested_info():
     print(f"SQL parent name: {sql_comp.metadata['parent_info']['parent_name']}")
     print(f"SQL parent type: {sql_comp.metadata['parent_info']['parent_type']}")
 
+def test_comprehensive_parsing():
+    """Test parsing of a comprehensive SAS file with nested components."""
+    parser = SASParser()
+    parser.INCLUDE_COMMENTS = True  # Enable comment parsing
+    
+    # Parse the test file
+    components = parser.parse_file('PROD/prd_mock_data/comprehensive_test.sas')
+    
+    # Verify top-level components
+    assert len([c for c in components if not c.parent_component]) > 0
+    
+    # Find the outer macro
+    outer_macro = next((c for c in components if c.name == 'outer'), None)
+    assert outer_macro is not None
+    
+    # Verify nested macros
+    inner_macros = [c for c in outer_macro.nested_components if c.type == 'MACRO']
+    assert len(inner_macros) == 2
+    
+    # Verify process_data macro components
+    process_macro = next((c for c in components if c.name == 'process_data'), None)
+    assert process_macro is not None
+    assert any(c.type == 'PROC_SQL' for c in process_macro.nested_components)
+    assert any(c.type == 'DATA' for c in process_macro.nested_components)
+
 def main():
     parser = argparse.ArgumentParser(description='Test SAS Parser, Embeddings, and Vector Store')
     parser.add_argument('--input', default='prd_mock_data', help='Input directory containing SAS files')
@@ -185,6 +210,7 @@ def main():
         test_directory_parsing()
         test_parser_relationships()
         test_parent_nested_info()
+        test_comprehensive_parsing()
 
     except Exception as e:
         logger.error(f"Critical error: {str(e)}", exc_info=True)

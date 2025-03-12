@@ -164,22 +164,15 @@ class SASParser:
         
         # Process matches and associate comments
         for start, end, comp_type, priority, match in matches:
-            # Skip if this is a comment pattern - we handle comments as part of other components
-            if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
-                continue
-            
             # Find any comments that belong to this component
             associated_comments = []
             
             if self.INCLUDE_COMMENTS:
                 for c_start, c_end, c_content in comment_matches[:]:  # Use slice to allow modification
-                    # Check if this comment is before the current component
                     if c_end <= start:
-                        # Check if there's only whitespace between comment and component
                         between_content = content[c_end:start].strip()
                         if not between_content:
                             associated_comments.append(c_content)
-                            # Remove this comment from further consideration
                             comment_matches.remove((c_start, c_end, c_content))
 
             # Get component content including comments
@@ -193,32 +186,34 @@ class SASParser:
             # Fix line_end calculation
             line_end = content.count('\n', 0, end) + line_offset
             
+            # Extract component name
+            name = ''
+            if comp_type in ['PROC', 'DATA', 'MACRO', 'LIBNAME']:
+                try:
+                    name = match.group(1).strip()
+                except:
+                    name = f"{comp_type.lower()}_{line_start}"
+            else:
+                name = f"{comp_type.lower()}_{line_start}"
+            
             # Handle macro components
             if comp_type == 'MACRO':
-                macro_name = match.group(1)
-                macro_stack.append(macro_name)
+                macro_stack.append(name)
             elif comp_type == 'MEND':
                 if macro_stack:
                     macro_stack.pop()
             
-            # Create component with correct line_end
+            # Create component
             component = SASComponent(
                 type=comp_type,
-                name=match.group(1) if comp_type != 'MEND' else f'mend_{line_start}',
+                name=name,
                 content=component_content,
                 line_start=line_start,
-                line_end=line_end,  # Use corrected line_end
+                line_end=line_end,
                 metadata={
-                    **file_metadata,  # Include file metadata
-                    "parent_info": {
-                        "parent_name": None,
-                        "parent_type": None
-                    },
-                    "nested_info": {
-                        "has_nested": False,
-                        "nested_count": 0,
-                        "nested_names": []
-                    }
+                    **file_metadata,
+                    "parent_info": {"parent_name": None, "parent_type": None},
+                    "nested_info": {"has_nested": False, "nested_count": 0, "nested_names": []}
                 }
             )
             
@@ -303,8 +298,11 @@ class SASParser:
 
     def _process_nested_components(self, components: List[SASComponent]) -> List[SASComponent]:
         """Process and link nested components with enhanced metadata."""
-        # Sort by line number
-        components.sort(key=lambda x: (x.line_start, -x.line_end))
+        # Sort by line number and length of content (longer components first for proper nesting)
+        components.sort(key=lambda x: (x.line_start, -len(x.content), -x.line_end))
+        
+        # Track macro nesting depth
+        macro_depth = {}
         
         # Find parent-child relationships and update metadata
         for i, comp in enumerate(components):
@@ -315,18 +313,25 @@ class SASParser:
                     comp.parent_component = potential_parent
                     potential_parent.nested_components.append(comp)
                     
+                    # Track macro nesting
+                    if comp.type == 'MACRO':
+                        parent_depth = macro_depth.get(potential_parent.name, 0)
+                        macro_depth[comp.name] = parent_depth + 1
+                    
                     # Update metadata
                     comp.metadata["parent_info"] = {
                         "parent_name": potential_parent.name,
-                        "parent_type": potential_parent.type
+                        "parent_type": potential_parent.type,
+                        "nesting_depth": macro_depth.get(comp.name, 0)
                     }
                     
                     # Update parent's nested info
-                    potential_parent.metadata["nested_info"] = {
+                    potential_parent.metadata["nested_info"].update({
                         "has_nested": True,
                         "nested_count": len(potential_parent.nested_components),
-                        "nested_names": [c.name for c in potential_parent.nested_components]
-                    }
+                        "nested_names": [c.name for c in potential_parent.nested_components],
+                        "nested_types": [c.type for c in potential_parent.nested_components]
+                    })
                     break
         
         # Return only top-level components
