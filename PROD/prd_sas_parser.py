@@ -125,7 +125,6 @@ class SASParser:
         """Enhanced parse content with macro validation."""
         components = []
         line_offset = 1
-        macro_stack = []
         
         # Ensure resolved file path
         resolved_path = str(Path(file_path).resolve())
@@ -138,16 +137,30 @@ class SASParser:
         # Split content into lines to track indentation
         content_lines = content.splitlines()
         
-        # Find all matches for all patterns
+        # First, handle special case for macros with proper nesting
+        macro_components = self._extract_macro_hierarchy(content, content_lines, file_metadata)
+        if macro_components:
+            components.extend(macro_components)
+        
+        # Find all matches for all patterns except MACRO (already handled)
         matches = []
         
         # Only process patterns that are currently compiled (based on INCLUDE_COMMENTS)
         for comp_type, (pattern, priority) in self.compiled_patterns.items():
+            if comp_type == 'MACRO':
+                continue  # Skip macro pattern as we handled it separately
+            
             for match in pattern.finditer(content):
                 start, end = match.span()
                 # Skip matches that are entirely within comment blocks if INCLUDE_COMMENTS is False
                 if not self.INCLUDE_COMMENTS and self._is_within_comment(content, start, end):
                     continue
+                
+                # Skip matches that overlap with macro components we already extracted
+                if any(self._ranges_overlap(start, end, comp.line_start, comp.line_end, content)
+                      for comp in macro_components):
+                    continue
+                
                 matches.append((start, end, comp_type, priority, match))
         
         # Sort matches by position
@@ -162,7 +175,7 @@ class SASParser:
             
             # Extract component name
             name = ''
-            if comp_type in ['PROC', 'DATA', 'MACRO', 'LIBNAME']:
+            if comp_type in ['PROC', 'DATA', 'LIBNAME']:
                 try:
                     name = match.group(1).strip()
                 except:
@@ -608,4 +621,121 @@ class SASParser:
                 "start": 0,
                 "end": 0
             }
-        } 
+        }
+
+    def _ranges_overlap(self, start1, end1, line_start, line_end, content):
+        """Check if character-based range overlaps with line-based range."""
+        line_start_char = content.find('\n', 0, start1) + 1 if start1 > 0 else 0
+        line_end_char = content.rfind('\n', 0, end1) + 1 if end1 > 0 else 0
+        
+        return (line_start <= content.count('\n', 0, start1) + 1 <= line_end or 
+                line_start <= content.count('\n', 0, end1) + 1 <= line_end)
+
+    def _extract_macro_hierarchy(self, content, content_lines, file_metadata):
+        """Extract macros with proper nesting hierarchy using a stack-based approach."""
+        components = []
+        macro_stack = []
+        in_comment = False
+        
+        # First, find all macro start and end positions
+        macro_starts = []  # (line_num, macro_name, is_start)
+        
+        for i, line in enumerate(content_lines):
+            line_num = i + 1
+            stripped = line.strip()
+            
+            # Skip comments unless INCLUDE_COMMENTS is True
+            if not self.INCLUDE_COMMENTS:
+                # Handle comment blocks
+                if '/*' in line and '*/' in line:
+                    # Comment begins and ends on same line
+                    pass
+                elif '/*' in line:
+                    in_comment = True
+                    continue
+                elif '*/' in line:
+                    in_comment = False
+                    continue
+                elif in_comment:
+                    continue
+                # Handle single-line comments
+                if stripped.startswith('*') and ';' in stripped:
+                    continue
+            
+            # Find macro definitions
+            if re.search(r'^\s*%macro\s+(\w+)', stripped, re.IGNORECASE):
+                macro_name = re.search(r'^\s*%macro\s+(\w+)', stripped, re.IGNORECASE).group(1)
+                macro_starts.append((line_num, macro_name, True))
+            
+            # Find macro ends
+            if re.search(r'^\s*%mend\s*(\w*)', stripped, re.IGNORECASE):
+                mend_match = re.search(r'^\s*%mend\s*(\w*)', stripped, re.IGNORECASE)
+                macro_name = mend_match.group(1).strip() if mend_match.group(1) else None
+                macro_starts.append((line_num, macro_name, False))
+        
+        # Process the macro hierarchy using a stack
+        open_macros = []
+        macro_ranges = []  # (start_line, end_line, macro_name, parent_name)
+        
+        for line_num, macro_name, is_start in macro_starts:
+            if is_start:
+                parent_name = open_macros[-1][1] if open_macros else None
+                open_macros.append((line_num, macro_name))
+            else:
+                if not open_macros:
+                    continue  # Unmatched %mend
+                
+                start_line, start_name = open_macros.pop()
+                # If macro_name is specified, ensure it matches
+                if macro_name and macro_name != start_name:
+                    # This is an unmatched %mend, ignore it
+                    open_macros.append((start_line, start_name))
+                    continue
+                
+                parent_name = open_macros[-1][1] if open_macros else None
+                macro_ranges.append((start_line, line_num, start_name, parent_name))
+        
+        # Create components for each macro range
+        for start_line, end_line, macro_name, parent_name in macro_ranges:
+            # Extract content with preserved indentation
+            macro_content = '\n'.join(content_lines[start_line-1:end_line])
+            
+            component = SASComponent(
+                type='MACRO',
+                name=macro_name,
+                content=macro_content,
+                line_start=start_line,
+                line_end=end_line,
+                metadata={
+                    **file_metadata,
+                    "parent_info": {
+                        "parent_name": parent_name,
+                        "parent_type": "MACRO" if parent_name else None
+                    },
+                    "nested_info": {
+                        "has_nested": False,
+                        "nested_count": 0, 
+                        "nested_names": []
+                    }
+                }
+            )
+            components.append(component)
+        
+        # Process nested components by updating metadata
+        for comp in components:
+            nested_comps = []
+            for other_comp in components:
+                if (other_comp.metadata["parent_info"]["parent_name"] == comp.name and
+                    other_comp != comp):
+                    nested_comps.append(other_comp)
+                
+            if nested_comps:
+                comp.nested_components = nested_comps
+                comp.metadata["nested_info"].update({
+                    "has_nested": True,
+                    "nested_count": len(nested_comps),
+                    "nested_names": [c.name for c in nested_comps]
+                })
+        
+        # Only return top-level macros
+        return [c for c in components if c.metadata["parent_info"]["parent_name"] is None] 
