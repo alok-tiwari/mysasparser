@@ -54,17 +54,7 @@ class SASChunkStore:
         """Convert SAS components to chunks format for Lab Vector Store."""
         chunks = []
         for component in components:
-            # Extract parent and nested info safely
-            parent_info = component.metadata.get("parent_info", {
-                "parent_name": None,
-                "parent_type": None
-            })
-            nested_info = component.metadata.get("nested_info", {
-                "has_nested": False,
-                "nested_count": 0,
-                "nested_names": []
-            })
-
+            # Direct access to metadata - will work because parser guarantees structure
             chunk = {
                 "content": component.content,
                 "metadata": {
@@ -73,17 +63,17 @@ class SASChunkStore:
                     "name": component.name,
                     "line_start": component.line_start,
                     "line_end": component.line_end,
-                    "file_path": component.metadata.get("file_path", ""),
-                    "source_file": component.metadata.get("source_file", ""),
+                    "file_path": component.metadata["file_path"],
+                    "source_file": component.metadata["source_file"],
                     
-                    # Parent/Nested relationships
-                    "parent_info": parent_info,
-                    "nested_info": nested_info,
+                    # Direct access to parent/nested info
+                    "parent_info": component.metadata["parent_info"],
+                    "nested_info": component.metadata["nested_info"],
                     
                     # Original indentation
-                    "original_indentation": component.metadata.get("original_indentation", 0),
+                    "original_indentation": component.metadata["original_indentation"],
                     
-                    # Any other metadata
+                    # Include rest of metadata
                     **component.metadata
                 }
             }
