@@ -37,17 +37,22 @@ class SASParser:
             'DATA': (r'data\s+([^;]+?)(?:\s+[^;]*)?;.*?run\s*;', 7),
             'LIBNAME': (r'libname\s+([a-zA-Z_]\w*)\s+[^;]+;', 6),
             'INCLUDE': (r'%include\s+([^;]+);', 5),
-            'LET': (r'%let\s+([a-zA-Z_]\w*)\s*=\s*[^;]+;', 4)
+            'OPTIONS': (r'options\s+[^;]+;', 1)
         }
         
-        # Only add comment patterns if INCLUDE_COMMENTS is True
-        if self.INCLUDE_COMMENTS:
-            self.base_patterns.update({
-                'BLOCK_COMMENT': (r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', 3),
-                'LINE_COMMENT': (r'^\s*\*[^;]*;', 2)
-            })
-            
-        self.base_patterns['OPTIONS'] = (r'options\s+[^;]+;', 1)
+        # Comment patterns - only added when INCLUDE_COMMENTS is True
+        self.comment_patterns = {
+            'BLOCK_COMMENT': (r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', 3),
+            'LINE_COMMENT': (r'^\s*\*[^;]*;', 2)
+        }
+        
+        # Macro patterns - only added when INCLUDE_COMMENTS is True
+        self.macro_call_patterns = {
+            'MACRO_CALL': (r'%(\w+)(?:\([^)]*\))?;', 8),
+            'MACRO_END': (r'%mend\s*(\w+)?\s*;', 8),
+            'MACRO_DO': (r'%do\s+.*?%end;', 8),
+            'MACRO_IF': (r'%if\s+.*?(?:%then|%do).*?(?:%end|;)', 8)
+        }
 
         # Advanced PROC patterns
         self.proc_patterns = {
@@ -58,14 +63,6 @@ class SASParser:
             'PROC_FREQ': (r'proc\s+freq\s+.*?(?=run;).*?run;', 10),
             'PROC_DATASETS': (r'proc\s+datasets\s+.*?(?:run|quit);', 10),
             'PROC_TEMPLATE': (r'proc\s+template\s+.*?(?:run|quit);', 10)
-        }
-
-        # Advanced macro patterns
-        self.macro_patterns = {
-            'MACRO_CALL': (r'%(\w+)(?:\([^)]*\))?;', 8),  # Capture macro name
-            'MACRO_END': (r'%mend\s*(\w+)?\s*;', 8),      # Optional macro name
-            'MACRO_DO': (r'%do\s+.*?%end;', 8),
-            'MACRO_IF': (r'%if\s+.*?(?:%then|%do).*?(?:%end|;)', 8)
         }
 
         # Data step patterns
@@ -79,13 +76,11 @@ class SASParser:
             'ARRAY': (r'array\s+.*?;', 6)
         }
 
-        # Combine all patterns
-        self.patterns = {
-            **self.base_patterns,
-            **self.proc_patterns,
-            **self.macro_patterns,
-            **self.data_patterns
-        }
+        # Combine patterns based on INCLUDE_COMMENTS setting
+        self.patterns = {**self.base_patterns}
+        if self.INCLUDE_COMMENTS:
+            self.patterns.update(self.comment_patterns)
+            self.patterns.update(self.macro_call_patterns)
         
         # Compile patterns
         self.compiled_patterns = {
@@ -147,14 +142,8 @@ class SASParser:
         matches = []
         comment_matches = []  # Separate list for comments
         
+        # Only process patterns that are currently compiled (based on INCLUDE_COMMENTS)
         for comp_type, (pattern, priority) in self.compiled_patterns.items():
-            if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
-                if self.INCLUDE_COMMENTS:
-                    # Store comments separately
-                    for match in pattern.finditer(content):
-                        comment_matches.append((match.start(), match.end(), match.group(0)))
-                continue
-            
             for match in pattern.finditer(content):
                 start, end = match.span()
                 matches.append((start, end, comp_type, priority, match))
@@ -162,28 +151,11 @@ class SASParser:
         # Sort matches by position
         matches.sort(key=lambda x: x[0])
         
-        # Process matches and associate comments
+        # Process matches
         for start, end, comp_type, priority, match in matches:
-            # Find any comments that belong to this component
-            associated_comments = []
-            
-            if self.INCLUDE_COMMENTS:
-                for c_start, c_end, c_content in comment_matches[:]:  # Use slice to allow modification
-                    if c_end <= start:
-                        between_content = content[c_end:start].strip()
-                        if not between_content:
-                            associated_comments.append(c_content)
-                            comment_matches.remove((c_start, c_end, c_content))
-
-            # Get component content including comments
-            if associated_comments:
-                component_content = '\n'.join(associated_comments + [match.group(0)])
-                line_start = content.count('\n', 0, content.find(associated_comments[0])) + line_offset
-            else:
-                component_content = match.group(0)
-                line_start = content.count('\n', 0, start) + line_offset
-            
-            # Fix line_end calculation
+            # Get component content
+            component_content = match.group(0)
+            line_start = content.count('\n', 0, start) + line_offset
             line_end = content.count('\n', 0, end) + line_offset
             
             # Extract component name
@@ -195,13 +167,6 @@ class SASParser:
                     name = f"{comp_type.lower()}_{line_start}"
             else:
                 name = f"{comp_type.lower()}_{line_start}"
-            
-            # Handle macro components
-            if comp_type == 'MACRO':
-                macro_stack.append(name)
-            elif comp_type == 'MEND':
-                if macro_stack:
-                    macro_stack.pop()
             
             # Create component
             component = SASComponent(
@@ -219,11 +184,6 @@ class SASParser:
             
             components.append(component)
         
-        # Validate macro structure
-        if macro_stack:
-            logger.warning(f"Unclosed macros found: {macro_stack}")
-
-        # After creating components, update their metadata in _process_nested_components
         return components
 
     def ensure_complete_coverage(self, content: str, components: List[SASComponent]) -> List[SASComponent]:

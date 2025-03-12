@@ -189,6 +189,51 @@ def test_comprehensive_parsing():
     assert any(c.type == 'PROC_SQL' for c in process_macro.nested_components)
     assert any(c.type == 'DATA' for c in process_macro.nested_components)
 
+def test_macro_call_handling():
+    """Test that single-line macro calls are handled correctly based on INCLUDE_COMMENTS setting."""
+    parser = SASParser()
+    
+    # Test with INCLUDE_COMMENTS = False
+    parser.INCLUDE_COMMENTS = False
+    components = parser.parse_file('PROD/prd_mock_data/comprehensive_test.sas')
+    
+    # Should not find any single-line macro calls
+    macro_calls = [c for c in components if c.type == 'MACRO_CALL']
+    assert len(macro_calls) == 0, "Found macro calls when INCLUDE_COMMENTS is False"
+    
+    # Test with INCLUDE_COMMENTS = True
+    parser.INCLUDE_COMMENTS = True
+    components = parser.parse_file('PROD/prd_mock_data/comprehensive_test.sas')
+    
+    # Should find macro calls
+    macro_calls = [c for c in components if c.type == 'MACRO_CALL']
+    assert len(macro_calls) > 0, "No macro calls found when INCLUDE_COMMENTS is True"
+
+def test_comment_and_macro_handling():
+    """Test comprehensive handling of comments and macro calls based on INCLUDE_COMMENTS setting."""
+    parser = SASParser()
+    
+    # Test with INCLUDE_COMMENTS = False
+    parser.INCLUDE_COMMENTS = False
+    components = parser.parse_file('PROD/prd_mock_data/comprehensive_test.sas')
+    
+    # Should not find any comments or single-line macro calls
+    comment_types = ['BLOCK_COMMENT', 'LINE_COMMENT', 'MACRO_CALL']
+    for comp in components:
+        assert comp.type not in comment_types, f"Found {comp.type} when INCLUDE_COMMENTS is False"
+        assert not comp.content.strip().startswith('*'), "Found line comment when INCLUDE_COMMENTS is False"
+        assert not comp.content.strip().startswith('/*'), "Found block comment when INCLUDE_COMMENTS is False"
+        if comp.type == 'MACRO':
+            assert '%macro' in comp.content.lower(), "Found single-line macro call when INCLUDE_COMMENTS is False"
+    
+    # Test with INCLUDE_COMMENTS = True
+    parser.INCLUDE_COMMENTS = True
+    components = parser.parse_file('PROD/prd_mock_data/comprehensive_test.sas')
+    
+    # Should find comments and macro calls
+    found_types = set(comp.type for comp in components)
+    assert any(t in found_types for t in comment_types), "No comments or macro calls found when INCLUDE_COMMENTS is True"
+
 def main():
     parser = argparse.ArgumentParser(description='Test SAS Parser, Embeddings, and Vector Store')
     parser.add_argument('--input', default='prd_mock_data', help='Input directory containing SAS files')
@@ -211,6 +256,8 @@ def main():
         test_parser_relationships()
         test_parent_nested_info()
         test_comprehensive_parsing()
+        test_macro_call_handling()
+        test_comment_and_macro_handling()
 
     except Exception as e:
         logger.error(f"Critical error: {str(e)}", exc_info=True)
