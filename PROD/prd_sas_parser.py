@@ -40,12 +40,13 @@ class SASParser:
             'OPTIONS': (r'options\s+[^;]+;', 1)
         }
         
-        # Comment patterns - only added when INCLUDE_COMMENTS is True
-        self.comment_patterns = {
+        # Comment and single-line patterns - only added when INCLUDE_COMMENTS is True
+        self.comment_and_single_line_patterns = {
             'BLOCK_COMMENT': (r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', 3),
-            'LINE_COMMENT': (r'^\s*\*[^;]*;', 2)
+            'LINE_COMMENT': (r'^\s*\*[^;]*;', 2),
+            'SINGLE_LINE_MACRO': (r'%(?!macro\s+)(\w+)(?:\([^)]*\))?\s*;', 1)  # Matches single-line macro calls but not macro definitions
         }
-        
+
         # Macro patterns - only added when INCLUDE_COMMENTS is True
         self.macro_call_patterns = {
             'MACRO_CALL': (r'%(\w+)(?:\([^)]*\))?;', 8),
@@ -79,8 +80,7 @@ class SASParser:
         # Combine patterns based on INCLUDE_COMMENTS setting
         self.patterns = {**self.base_patterns}
         if self.INCLUDE_COMMENTS:
-            self.patterns.update(self.comment_patterns)
-            self.patterns.update(self.macro_call_patterns)
+            self.patterns.update(self.comment_and_single_line_patterns)
         
         # Compile patterns
         self.compiled_patterns = {
@@ -140,12 +140,14 @@ class SASParser:
         
         # Find all matches for all patterns
         matches = []
-        comment_matches = []  # Separate list for comments
         
         # Only process patterns that are currently compiled (based on INCLUDE_COMMENTS)
         for comp_type, (pattern, priority) in self.compiled_patterns.items():
             for match in pattern.finditer(content):
                 start, end = match.span()
+                # Skip matches that are entirely within comment blocks if INCLUDE_COMMENTS is False
+                if not self.INCLUDE_COMMENTS and self._is_within_comment(content, start, end):
+                    continue
                 matches.append((start, end, comp_type, priority, match))
         
         # Sort matches by position
@@ -186,6 +188,26 @@ class SASParser:
         
         return components
 
+    def _is_within_comment(self, content: str, start: int, end: int) -> bool:
+        """Check if a code segment is entirely within a comment block."""
+        # Check if inside a /* */ style comment
+        comment_blocks = []
+        
+        # Find all /* */ comment blocks
+        for match in re.finditer(r'/\*.*?\*/', content, re.DOTALL):
+            comment_blocks.append(match.span())
+        
+        # Find all * ; style comments
+        for match in re.finditer(r'^\s*\*[^;]*;', content, re.MULTILINE):
+            comment_blocks.append(match.span())
+        
+        # Check if the given range is within any comment block
+        for comment_start, comment_end in comment_blocks:
+            if start >= comment_start and end <= comment_end:
+                return True
+        
+        return False
+
     def ensure_complete_coverage(self, content: str, components: List[SASComponent]) -> List[SASComponent]:
         """Ensure all lines are captured in components with preserved indentation."""
         content_lines = content.splitlines()
@@ -205,12 +227,48 @@ class SASParser:
         uncovered_ranges = []
         
         # Find gaps in coverage
-        for line in range(1, total_lines + 1):
+        line = 1
+        while line <= total_lines:
             if line not in covered_lines:
+                current_line = content_lines[line-1].strip()
+                skip_line = False
+                
+                # Skip single-line macro calls when INCLUDE_COMMENTS is False
+                if not self.INCLUDE_COMMENTS and current_line.startswith('%') and current_line.endswith(';'):
+                    skip_line = True
+                
+                # Skip single-line comments when INCLUDE_COMMENTS is False
+                if not self.INCLUDE_COMMENTS and (
+                    (current_line.startswith('/*') and current_line.endswith('*/')) or
+                    (current_line.startswith('*') and current_line.endswith(';'))
+                ):
+                    skip_line = True
+                
+                # Handle multi-line comments
+                if not self.INCLUDE_COMMENTS and current_line.startswith('/*') and not current_line.endswith('*/'):
+                    # Find the end of this multi-line comment
+                    comment_end = line
+                    while comment_end <= total_lines:
+                        if '*/' in content_lines[comment_end-1]:
+                            break
+                        comment_end += 1
+                    
+                    # Skip all lines in this comment
+                    for i in range(line, comment_end + 1):
+                        covered_lines.add(i)
+                    line = comment_end + 1
+                    continue
+                
+                if skip_line:
+                    covered_lines.add(line)
+                    line += 1
+                    continue
+                
                 if not uncovered_ranges or uncovered_ranges[-1][1] != line - 1:
                     uncovered_ranges.append([line, line])
                 else:
                     uncovered_ranges[-1][1] = line
+            line += 1
         
         # Create DEFAULT components for uncovered ranges
         for start, end in uncovered_ranges:
@@ -259,7 +317,28 @@ class SASParser:
     def _process_nested_components(self, components: List[SASComponent]) -> List[SASComponent]:
         """Process and link nested components with enhanced metadata."""
         # Sort by line number and length of content (longer components first for proper nesting)
-        components.sort(key=lambda x: (x.line_start, -len(x.content), -x.line_end))
+        components.sort(key=lambda x: (x.line_start, -(x.line_end - x.line_start), -x.line_end))
+        
+        # Ensure macros are processed according to their nesting structure
+        components_by_line = {comp.line_start: comp for comp in components}
+        macro_stack = []
+        
+        # First pass to correctly identify macro nesting
+        for comp in sorted(components, key=lambda x: x.line_start):
+            if comp.type == 'MACRO':
+                # Get the macro name from the content
+                macro_name_match = re.search(r'%macro\s+([a-zA-Z_]\w*)', comp.content, re.IGNORECASE)
+                if macro_name_match:
+                    macro_name = macro_name_match.group(1)
+                    comp.name = macro_name
+                    macro_stack.append((macro_name, comp))
+            
+            # Check for macro end markers
+            macro_end_matches = re.finditer(r'%mend\s*(\w*)\s*;', comp.content, re.IGNORECASE)
+            for macro_end in macro_end_matches:
+                ended_macro = macro_end.group(1).strip() if macro_end.group(1) else None
+                if macro_stack and (not ended_macro or ended_macro == macro_stack[-1][0]):
+                    macro_stack.pop()
         
         # Track macro nesting depth
         macro_depth = {}

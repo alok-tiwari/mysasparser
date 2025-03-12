@@ -234,6 +234,46 @@ def test_comment_and_macro_handling():
     found_types = set(comp.type for comp in components)
     assert any(t in found_types for t in comment_types), "No comments or macro calls found when INCLUDE_COMMENTS is True"
 
+def test_single_line_macro_handling():
+    """Test that single-line macro calls are properly handled based on INCLUDE_COMMENTS setting."""
+    parser = SASParser()
+    
+    test_content = """
+%macro test;
+    %put hello;
+%mend;
+
+%test;
+%inner1;
+%inner2;
+"""
+    
+    with open("PROD/prd_mock_data/macro_test.sas", "w") as f:
+        f.write(test_content)
+    
+    # Test with INCLUDE_COMMENTS = False
+    parser.INCLUDE_COMMENTS = False
+    components = parser.parse_file("PROD/prd_mock_data/macro_test.sas")
+    
+    # Should only find the macro definition, not the calls
+    macro_components = [c for c in components if c.type == 'MACRO']
+    assert len(macro_components) == 1, "Should only find macro definition"
+    assert all('%macro' in c.content for c in macro_components), "Found macro call instead of definition"
+    
+    # Verify no single-line macro calls are present
+    all_content = ' '.join(c.content for c in components)
+    assert '%test;' not in all_content, "Found single-line macro call when INCLUDE_COMMENTS is False"
+    assert '%inner1;' not in all_content, "Found single-line macro call when INCLUDE_COMMENTS is False"
+    assert '%inner2;' not in all_content, "Found single-line macro call when INCLUDE_COMMENTS is False"
+    
+    # Test with INCLUDE_COMMENTS = True
+    parser.INCLUDE_COMMENTS = True
+    components = parser.parse_file("PROD/prd_mock_data/macro_test.sas")
+    
+    # Should find both macro definition and calls
+    single_line_macros = [c for c in components if c.type == 'SINGLE_LINE_MACRO']
+    assert len(single_line_macros) == 3, "Should find all single-line macro calls"
+
 def main():
     parser = argparse.ArgumentParser(description='Test SAS Parser, Embeddings, and Vector Store')
     parser.add_argument('--input', default='prd_mock_data', help='Input directory containing SAS files')
@@ -258,6 +298,7 @@ def main():
         test_comprehensive_parsing()
         test_macro_call_handling()
         test_comment_and_macro_handling()
+        test_single_line_macro_handling()
 
     except Exception as e:
         logger.error(f"Critical error: {str(e)}", exc_info=True)
