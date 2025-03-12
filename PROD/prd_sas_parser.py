@@ -31,13 +31,13 @@ class SASParser:
         """Initialize the SAS parser."""
         # Base patterns with priority order
         self.base_patterns = {
-            'PROC_SQL': (r'proc\s+sql\s*;(?:(?!/\*|\*/).)*?(?:quit|run)\s*;', 10),  # Better comment handling
-            'MACRO': (r'%macro\s+([a-zA-Z_]\w*)(?:\s*\([^)]*\))?\s*;.*?%mend\s*(?:\1)?\s*;', 9),  # Better param handling
-            'PROC': (r'proc\s+(\w+)(?:\s+[^;]*)?;.*?(?:run|quit)\s*;', 8),  # Better PROC options
-            'DATA': (r'data\s+([^;]+?)(?:\s+[^;]*)?;.*?run\s*;', 7),  # Better dataset options
-            'LIBNAME': (r'libname\s+([a-zA-Z_]\w*)\s+[^;]+;', 6),  # Stricter libname
+            'PROC_SQL': (r'proc\s+sql\s*;(?:(?!/\*|\*/).)*?(?:quit|run)\s*;', 10),
+            'MACRO': (r'%macro\s+([a-zA-Z_]\w*)(?:\s*\([^)]*\))?\s*;.*?%mend\s*(?:\1)?\s*;', 9),
+            'PROC': (r'proc\s+(\w+)(?:\s+[^;]*)?;.*?(?:run|quit)\s*;', 8),
+            'DATA': (r'data\s+([^;]+?)(?:\s+[^;]*)?;.*?run\s*;', 7),
+            'LIBNAME': (r'libname\s+([a-zA-Z_]\w*)\s+[^;]+;', 6),
             'INCLUDE': (r'%include\s+([^;]+);', 5),
-            'LET': (r'%let\s+([a-zA-Z_]\w*)\s*=\s*[^;]+;', 4)  # Stricter macro var
+            'LET': (r'%let\s+([a-zA-Z_]\w*)\s*=\s*[^;]+;', 4)
         }
         
         # Only add comment patterns if INCLUDE_COMMENTS is True
@@ -62,12 +62,10 @@ class SASParser:
 
         # Advanced macro patterns
         self.macro_patterns = {
-            'MACRO_DEF': (r'%macro\s+([a-zA-Z_]\w*)(?:\s*\([^)]*\))?\s*;.*?%mend\s*(?:\1)?\s*;', 9),
-            'MACRO_END': (r'%mend\s*;', 8),  # Add standalone MEND
-            'MACRO_CALL': (r'%\w+(?:\([^)]*\))?;', 8),
+            'MACRO_CALL': (r'%(\w+)(?:\([^)]*\))?;', 8),  # Capture macro name
+            'MACRO_END': (r'%mend\s*(\w+)?\s*;', 8),      # Optional macro name
             'MACRO_DO': (r'%do\s+.*?%end;', 8),
-            'MACRO_IF': (r'%if\s+.*?(?:%then|%do).*?(?:%end|;)', 8),
-            'MACRO_FUNCTION': (r'%function\s+.*?%mend;', 9)
+            'MACRO_IF': (r'%if\s+.*?(?:%then|%do).*?(?:%end|;)', 8)
         }
 
         # Data step patterns
@@ -132,13 +130,14 @@ class SASParser:
         """Enhanced parse content with macro validation."""
         components = []
         line_offset = 1
-        macro_stack = []  # Initialize macro stack here
+        macro_stack = []
         
-        # Track file-level metadata
+        # Ensure resolved file path
+        resolved_path = str(Path(file_path).resolve())
         file_metadata = {
-            "file_path": str(Path(file_path).resolve()),
-            "source_file": os.path.basename(file_path),
-            "directory": os.path.dirname(file_path)
+            "file_path": resolved_path,
+            "source_file": os.path.basename(resolved_path),
+            "directory": os.path.dirname(resolved_path)
         }
         
         # Split content into lines to track indentation
@@ -284,11 +283,15 @@ class SASParser:
         return components
 
     def ensure_complete_coverage(self, content: str, components: List[SASComponent]) -> List[SASComponent]:
-        """
-        Ensure all lines are captured in components with preserved indentation.
-        """
+        """Ensure all lines are captured in components with preserved indentation."""
         content_lines = content.splitlines()
         covered_lines = set()
+        
+        # Get file metadata from existing components to ensure consistency
+        file_metadata = next((
+            comp.metadata for comp in components 
+            if "file_path" in comp.metadata
+        ), {})
         
         for comp in components:
             for line in range(comp.line_start, comp.line_end + 1):
@@ -329,8 +332,18 @@ class SASParser:
                         line_start=start,
                         line_end=end,
                         metadata={
+                            **file_metadata,  # Include file metadata
                             "coverage_type": "auto_generated",
-                            "original_indentation": min_indent
+                            "original_indentation": min_indent,
+                            "parent_info": {
+                                "parent_name": None,
+                                "parent_type": None
+                            },
+                            "nested_info": {
+                                "has_nested": False,
+                                "nested_count": 0,
+                                "nested_names": []
+                            }
                         }
                     )
                     components.append(component)

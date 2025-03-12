@@ -31,24 +31,47 @@ class SASChunkStore:
             logger.error(f"Failed to connect to Lab Vector Store: {str(e)}")
             raise
 
-    def _prepare_default_chunks(self, components: List[SASComponent]) -> List[Dict[str, Any]]:
-        """Default chunking strategy if LabVectorStore doesn't provide one."""
-        chunks = []
+    def _prepare_and_store_chunks(self, components: List[SASComponent]) -> List[Document]:
+        """Default chunking strategy for SAS components using RecursiveCharacterTextSplitter."""
+        all_chunks = []
         for component in components:
-            chunk = {
-                "content": component.content,
-                "metadata": {
-                    "type": component.type,
-                    "name": component.name,
-                    "line_start": component.line_start,
-                    "line_end": component.line_end,
-                    "file_path": component.metadata.get("file_path", ""),
-                    "source_file": component.metadata.get("source_file", ""),
-                    **component.metadata
-                }
+            document = component.content
+            
+            # Safely get parent and nested info with defaults
+            parent_info = component.metadata.get("parent_info", {
+                "parent_name": None,
+                "parent_type": None
+            })
+            nested_info = component.metadata.get("nested_info", {
+                "has_nested": False,
+                "nested_count": 0,
+                "nested_names": []
+            })
+
+            file_path = component.metadata.get("file_path", "")
+            file_name = os.path.basename(file_path) if file_path else "unknown"
+
+            additional_metadata = {
+                "type": component.type,
+                "name": component.name,
+                "line_start": component.line_start,
+                "line_end": component.line_end,
+                "file_path": file_path,
+                "file_name": file_name,
+                "parent_name": parent_info.get("parent_name"),  # Safe access
+                "parent_type": parent_info.get("parent_type"),  # Safe access
+                "has_nested": nested_info.get("has_nested", False),  # Safe access
+                "nested_count": nested_info.get("nested_count", 0),  # Safe access
+                "nested_names": nested_info.get("nested_names", [])  # Safe access
             }
-            chunks.append(chunk)
-        return chunks
+
+            logger.info(f"Added metadata looks like: {additional_metadata}")
+            chunks = load_and_split(document, additional_metadata)
+            logger.info(f"Generated {len(chunks)} chunks for component: {component.name}")
+            ids = self.vector_store.add_documents(documents=chunks)
+            logger.info(f"Added document IDs to Risklab Vector Store: {ids}")
+
+        return True
 
     def prepare_chunks(self, components: List[SASComponent]) -> List[Dict[str, Any]]:
         """Convert SAS components to chunks format for Lab Vector Store."""
