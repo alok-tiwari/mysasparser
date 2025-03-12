@@ -164,32 +164,28 @@ class SASParser:
         
         # Process matches and associate comments
         for start, end, comp_type, priority, match in matches:
+            # Skip if this is a comment pattern - we handle comments as part of other components
+            if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
+                continue
+            
             # Find any comments that belong to this component
             associated_comments = []
-            last_comment_end = 0
             
             if self.INCLUDE_COMMENTS:
-                for c_start, c_end, c_content in comment_matches:
-                    # Check if this comment is after the last one we processed
-                    # and before the current component
-                    if c_start > last_comment_end and c_end <= start:
-                        # Check if there's only whitespace or newlines between comments
-                        between_comments = content[last_comment_end:c_start].strip()
-                        between_component = content[c_end:start].strip()
-                        
-                        if (not between_comments or between_comments.isspace()) and \
-                           (not between_component or between_component.isspace()):
+                for c_start, c_end, c_content in comment_matches[:]:  # Use slice to allow modification
+                    # Check if this comment is before the current component
+                    if c_end <= start:
+                        # Check if there's only whitespace between comment and component
+                        between_content = content[c_end:start].strip()
+                        if not between_content:
                             associated_comments.append(c_content)
-                            last_comment_end = c_end
-            
-            # Get component content including all comments
-            if associated_comments and self.INCLUDE_COMMENTS:
-                # Join all comments and the component with proper newlines
-                all_content = associated_comments + [match.group(0)]
-                component_content = '\n'.join(all_content)
-                # Get line start from first comment
-                first_comment_start = content.find(associated_comments[0])
-                line_start = content.count('\n', 0, first_comment_start) + line_offset
+                            # Remove this comment from further consideration
+                            comment_matches.remove((c_start, c_end, c_content))
+
+            # Get component content including comments
+            if associated_comments:
+                component_content = '\n'.join(associated_comments + [match.group(0)])
+                line_start = content.count('\n', 0, content.find(associated_comments[0])) + line_offset
             else:
                 component_content = match.group(0)
                 line_start = content.count('\n', 0, start) + line_offset
@@ -205,73 +201,26 @@ class SASParser:
                 if macro_stack:
                     macro_stack.pop()
             
-            # Special handling for comments
-            if comp_type in ['BLOCK_COMMENT', 'LINE_COMMENT']:
-                preserved_content, comment_metadata = self._process_comment(
-                    match.group(0), 
-                    line_start,
-                    content_lines
-                )
-                
-                enhanced_metadata = self._create_base_metadata(file_metadata)
-                enhanced_metadata["parent_info"] = {
-                    "parent_name": None,
-                    "parent_type": None
-                }
-                enhanced_metadata["nested_info"] = {
-                    "has_nested": False,
-                    "nested_count": 0,
-                    "nested_names": []
-                }
-                
-                component = SASComponent(
-                    type='COMMENT',
-                    name=f"comment_{line_start}",
-                    content=preserved_content,
-                    line_start=line_start,
-                    line_end=line_start,
-                    metadata=enhanced_metadata
-                )
-            
-            else:
-                # Regular component handling (existing code)
-                component_lines = content_lines[line_start-1:line_start]
-                if component_lines:
-                    indents = [len(line) - len(line.lstrip()) 
-                              for line in component_lines if line.strip()]
-                    if indents:
-                        min_indent = min(indents)
-                        component_lines = [line[min_indent:] if line.strip() else line 
-                                         for line in component_lines]
-                    component_content = '\n'.join(component_lines)
-                else:
-                    component_content = component_content
-                
-                # Extract component name
-                name = ''
-                if comp_type in ['PROC', 'DATA', 'MACRO']:
-                    try:
-                        name = match.group(1).strip()
-                    except:
-                        name = 'unnamed'
-                
-                # Add macro context to metadata
-                enhanced_metadata = self._create_base_metadata(file_metadata)
-                if macro_stack:
-                    enhanced_metadata["macro_context"] = {
-                        "current_macro": macro_stack[-1] if macro_stack else None,
-                        "macro_depth": len(macro_stack)
+            # Create component with correct line_end
+            component = SASComponent(
+                type=comp_type,
+                name=match.group(1) if comp_type != 'MEND' else f'mend_{line_start}',
+                content=component_content,
+                line_start=line_start,
+                line_end=line_end,  # Use corrected line_end
+                metadata={
+                    **file_metadata,  # Include file metadata
+                    "parent_info": {
+                        "parent_name": None,
+                        "parent_type": None
+                    },
+                    "nested_info": {
+                        "has_nested": False,
+                        "nested_count": 0,
+                        "nested_names": []
                     }
-                
-                # Create component with correct line_end
-                component = SASComponent(
-                    type=comp_type,
-                    name=name if comp_type != 'MEND' else f'mend_{line_start}',
-                    content=component_content,
-                    line_start=line_start,
-                    line_end=line_end,  # Use corrected line_end
-                    metadata=enhanced_metadata
-                )
+                }
+            )
             
             components.append(component)
         
