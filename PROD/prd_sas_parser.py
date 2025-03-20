@@ -9,6 +9,31 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('PRDSASParser')
 
+def preprocess_sas_content(content):
+    """
+    Preprocess SAS content to handle comments properly.
+    This function removes comments when INCLUDE_COMMENTS is False to prevent them
+    from being incorrectly matched by other patterns.
+    
+    Args:
+        content (str): The original SAS content
+        
+    Returns:
+        str: Processed content with comments handled
+    """
+    # If we're including comments, return the original content
+    if SASParser.INCLUDE_COMMENTS:
+        return content
+    
+    # Otherwise, remove comment blocks before pattern matching
+    # Remove block comments (/* */)
+    content_no_block_comments = re.sub(r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/', '', content, flags=re.DOTALL)
+    
+    # Remove line comments (* ;)
+    content_no_comments = re.sub(r'^\s*\*[^;]*;', '', content_no_block_comments, flags=re.MULTILINE)
+    
+    return content_no_comments
+
 @dataclass
 class SASComponent:
     """Represents a parsed SAS component."""
@@ -126,6 +151,9 @@ class SASParser:
         components = []
         line_offset = 1
         
+        # Preprocess content to handle comments properly when INCLUDE_COMMENTS is False
+        processed_content = preprocess_sas_content(content)
+        
         # Ensure resolved file path
         resolved_path = str(Path(file_path).resolve())
         file_metadata = {
@@ -150,8 +178,23 @@ class SASParser:
             if comp_type == 'MACRO':
                 continue  # Skip macro pattern as we handled it separately
             
-            for match in pattern.finditer(content):
+            # Use processed_content for pattern matching when not including comments
+            content_to_search = processed_content if not self.INCLUDE_COMMENTS else content
+            
+            for match in pattern.finditer(content_to_search):
                 start, end = match.span()
+                
+                # Map positions back to original content for proper line tracking
+                # This is important when using preprocessed content
+                if not self.INCLUDE_COMMENTS and content_to_search != content:
+                    # This is a simplified approach - for a complete solution, 
+                    # a more sophisticated mapping would be needed
+                    original_match_text = match.group(0)
+                    real_start = content.find(original_match_text)
+                    if real_start >= 0:
+                        real_end = real_start + len(original_match_text)
+                        start, end = real_start, real_end
+                
                 # Skip matches that are entirely within comment blocks if INCLUDE_COMMENTS is False
                 if not self.INCLUDE_COMMENTS and self._is_within_comment(content, start, end):
                     continue
@@ -172,6 +215,10 @@ class SASParser:
             component_content = match.group(0)
             line_start = content.count('\n', 0, start) + line_offset
             line_end = content.count('\n', 0, end) + line_offset
+            
+            # Skip if this appears to be a comment block and INCLUDE_COMMENTS is False
+            if not self.INCLUDE_COMMENTS and self._seems_like_comment(component_content):
+                continue
             
             # Extract component name
             name = ''
@@ -202,27 +249,54 @@ class SASParser:
         return components
 
     def _is_within_comment(self, content: str, start: int, end: int) -> bool:
-        """Check if a code segment is entirely within a comment block."""
-        # Check if inside a /* */ style comment
+        """
+        Check if a code segment is entirely within a comment block.
+        Uses the same robust patterns as the preprocessing function.
+        
+        Args:
+            content: The full content string
+            start: Start position of the segment
+            end: End position of the segment
+            
+        Returns:
+            bool: True if the segment is within a comment block
+        """
+        if self.INCLUDE_COMMENTS:
+            return False  # No need to check when including comments
+            
+        # Find all /* */ style comment blocks
+        block_comment_pattern = r'/\*[^*]*\*+(?:[^/*][^*]*\*+)*/'
         comment_blocks = []
         
-        # Find all /* */ comment blocks
-        for match in re.finditer(r'/\*.*?\*/', content, re.DOTALL):
+        for match in re.finditer(block_comment_pattern, content, re.DOTALL):
             comment_blocks.append(match.span())
         
-        # Find all * ; style comments
-        for match in re.finditer(r'^\s*\*[^;]*;', content, re.MULTILINE):
+        # Find all * ; style line comments
+        line_comment_pattern = r'^\s*\*[^;]*;'
+        for match in re.finditer(line_comment_pattern, content, re.MULTILINE):
             comment_blocks.append(match.span())
         
-        # Check if the given range is within any comment block
+        # Check if the given range is entirely within any comment block
         for comment_start, comment_end in comment_blocks:
             if start >= comment_start and end <= comment_end:
                 return True
-        
-        return False
+                
+        # Check if the segment itself appears to be a comment
+        segment = content[start:end]
+        return self._seems_like_comment(segment)
 
     def ensure_complete_coverage(self, content: str, components: List[SASComponent]) -> List[SASComponent]:
-        """Ensure all lines are captured in components with preserved indentation."""
+        """
+        Ensure all lines are captured in components with preserved indentation.
+        Handles comments based on INCLUDE_COMMENTS setting.
+        
+        Args:
+            content: The full content string
+            components: List of existing components
+            
+        Returns:
+            List of components with complete coverage
+        """
         content_lines = content.splitlines()
         covered_lines = set()
         
@@ -232,62 +306,80 @@ class SASParser:
             if "file_path" in comp.metadata
         ), {})
         
+        # Mark all lines covered by existing components
         for comp in components:
             for line in range(comp.line_start, comp.line_end + 1):
                 covered_lines.add(line)
+        
+        # Preprocess to identify comment lines when not including comments
+        comment_lines = set()
+        if not self.INCLUDE_COMMENTS:
+            in_comment_block = False
+            for i, line in enumerate(content_lines, 1):
+                stripped = line.strip()
+                
+                # Check for block comments
+                if '/*' in line and '*/' in line and not in_comment_block:
+                    # Single line block comment
+                    comment_lines.add(i)
+                elif '/*' in line and not in_comment_block:
+                    in_comment_block = True
+                    comment_lines.add(i)
+                elif '*/' in line and in_comment_block:
+                    in_comment_block = False
+                    comment_lines.add(i)
+                elif in_comment_block:
+                    comment_lines.add(i)
+                # Check for line comments
+                elif stripped.startswith('*') and ';' in stripped:
+                    comment_lines.add(i)
+                # Check for single line macro calls
+                elif stripped.startswith('%') and stripped.endswith(';') and '%macro' not in stripped.lower() and '%mend' not in stripped.lower():
+                    comment_lines.add(i)
         
         total_lines = len(content_lines)
         uncovered_ranges = []
         
         # Find gaps in coverage
         line = 1
+        current_range_start = None
+        
         while line <= total_lines:
             if line not in covered_lines:
-                current_line = content_lines[line-1].strip()
-                skip_line = False
-                
-                # Skip single-line macro calls when INCLUDE_COMMENTS is False
-                if not self.INCLUDE_COMMENTS and current_line.startswith('%') and current_line.endswith(';'):
-                    skip_line = True
-                
-                # Skip single-line comments when INCLUDE_COMMENTS is False
-                if not self.INCLUDE_COMMENTS and (
-                    (current_line.startswith('/*') and current_line.endswith('*/')) or
-                    (current_line.startswith('*') and current_line.endswith(';'))
-                ):
-                    skip_line = True
-                
-                # Handle multi-line comments
-                if not self.INCLUDE_COMMENTS and current_line.startswith('/*') and not current_line.endswith('*/'):
-                    # Find the end of this multi-line comment
-                    comment_end = line
-                    while comment_end <= total_lines:
-                        if '*/' in content_lines[comment_end-1]:
-                            break
-                        comment_end += 1
-                    
-                    # Skip all lines in this comment
-                    for i in range(line, comment_end + 1):
-                        covered_lines.add(i)
-                    line = comment_end + 1
-                    continue
-                
-                if skip_line:
-                    covered_lines.add(line)
+                # Skip comment lines when not including comments
+                if not self.INCLUDE_COMMENTS and line in comment_lines:
                     line += 1
                     continue
                 
-                if not uncovered_ranges or uncovered_ranges[-1][1] != line - 1:
-                    uncovered_ranges.append([line, line])
-                else:
-                    uncovered_ranges[-1][1] = line
+                # Start a new range or continue current
+                if current_range_start is None:
+                    current_range_start = line
+            else:
+                # End current range if exists
+                if current_range_start is not None:
+                    uncovered_ranges.append((current_range_start, line - 1))
+                    current_range_start = None
+            
             line += 1
+        
+        # Handle final range if exists
+        if current_range_start is not None:
+            uncovered_ranges.append((current_range_start, total_lines))
         
         # Create DEFAULT components for uncovered ranges
         for start, end in uncovered_ranges:
             # Extract content for this range with preserved indentation
             range_lines = content_lines[start-1:end]
             if range_lines:
+                # Skip ranges that are just comments when not including comments
+                if not self.INCLUDE_COMMENTS:
+                    all_comments = True
+                    range_content = '\n'.join(range_lines)
+                    if not self._seems_like_comment(range_content):
+                        all_comments = False
+                    if all_comments:
+                        continue
+                
                 # Find minimum indentation in non-empty lines
                 indents = [len(line) - len(line.lstrip()) 
                           for line in range_lines if line.strip()]
@@ -635,32 +727,58 @@ class SASParser:
         """Extract macros with proper nesting hierarchy using a stack-based approach."""
         components = []
         macro_stack = []
-        in_comment = False
         
-        # First, find all macro start and end positions
-        macro_starts = []  # (line_num, macro_name, is_start)
-        
-        for i, line in enumerate(content_lines):
-            line_num = i + 1
-            stripped = line.strip()
+        # Preprocess content for macro detection when INCLUDE_COMMENTS is False
+        if not self.INCLUDE_COMMENTS:
+            # For macro detection in preprocessed content, we need to preserve line numbers
+            # Replace comment blocks with empty lines to maintain line count
+            processed_lines = []
+            in_comment = False
             
-            # Skip comments unless INCLUDE_COMMENTS is True
-            if not self.INCLUDE_COMMENTS:
-                # Handle comment blocks
+            for line in content_lines:
+                stripped = line.strip()
+                
+                # Handle block comments
                 if '/*' in line and '*/' in line:
-                    # Comment begins and ends on same line
-                    pass
+                    # Comment begins and ends on same line - replace with empty line
+                    processed_lines.append('')
+                    continue
                 elif '/*' in line:
                     in_comment = True
+                    processed_lines.append('')
                     continue
                 elif '*/' in line:
                     in_comment = False
+                    processed_lines.append('')
                     continue
                 elif in_comment:
+                    processed_lines.append('')
                     continue
-                # Handle single-line comments
+                    
+                # Handle line comments
                 if stripped.startswith('*') and ';' in stripped:
+                    processed_lines.append('')
                     continue
+                    
+                # Non-comment line
+                processed_lines.append(line)
+                
+            # Use processed content lines for macro detection
+            analysis_lines = processed_lines
+        else:
+            # If including comments, use original content
+            analysis_lines = content_lines
+        
+        # First, find all macro start and end positions
+        macro_starts = []  # (line_num, macro_name, is_start)
+        in_comment = False
+        
+        for i, line in enumerate(analysis_lines):
+            line_num = i + 1
+            stripped = line.strip()
+            
+            if not stripped:
+                continue  # Skip empty lines
             
             # Find macro definitions
             if re.search(r'^\s*%macro\s+(\w+)', stripped, re.IGNORECASE):
@@ -738,4 +856,26 @@ class SASParser:
                 })
         
         # Only return top-level macros
-        return [c for c in components if c.metadata["parent_info"]["parent_name"] is None] 
+        return [c for c in components if c.metadata["parent_info"]["parent_name"] is None]
+
+    def _seems_like_comment(self, content: str) -> bool:
+        """Check if the content appears to be primarily a comment block."""
+        # Check if content starts with comment markers
+        if content.lstrip().startswith('/*') or content.lstrip().startswith('*'):
+            return True
+            
+        # Check if most of the content is within comment blocks
+        comment_patterns = [
+            r'/\*.*?\*/',  # Block comments
+            r'^\s*\*[^;]*;'  # Line comments
+        ]
+        
+        content_length = len(content)
+        comment_length = 0
+        
+        for pattern in comment_patterns:
+            for match in re.finditer(pattern, content, re.DOTALL | re.MULTILINE):
+                comment_length += len(match.group(0))
+        
+        # If more than 50% is comments, consider it a comment block
+        return comment_length > content_length * 0.5 
