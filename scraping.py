@@ -4,193 +4,98 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
-import os
 import time
-import traceback
-
-# Set environment variables if needed
-os.environ['CURL_CA_BUNDLE'] = ''
 
 # Configure Chrome options
 options = Options()
 options.add_argument('--no-sandbox')
-options.add_argument('--remote-debugging-port=9222')
-options.add_argument('--headless')
+options.add_argument('--headless')  # Remove this if you want to see the browser
 options.add_argument('--disable-gpu')
-options.add_argument('--ignore-certificate-errors')
-options.add_argument('--disable-dev-shm-usage')  # Add this to help with memory issues in containers
-options.add_argument('--window-size=1920,1080')  # Set a larger window size
+options.add_argument('--disable-dev-shm-usage')
+options.add_argument('--window-size=1920,1080')
+options.add_argument('--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-# Chrome might be blocking the site through the proxy - let's make it optional
-# If you need the proxy, uncomment these lines
-# proxy = {
-#     'http': f'http://<redacted>:24',
-#     'https': f'http://<redacted>:24'
-# }
-# options.add_argument(f'--proxy-server={proxy["http"]}')
-
-# Path to your chromedriver executable
+# Path to chromedriver
 chromedriver_path = '/mnt/chrome/chromedriver-linux64/chromedriver'
-
-# Set up the ChromeDriver service
 service = Service(executable_path=chromedriver_path)
 
 try:
-    # Set up the Selenium WebDriver
+    # Initialize driver
     driver = webdriver.Chrome(service=service, options=options)
     
-    # Define the website URL
+    # Load the page
     url = "https://www.boerse-frankfurt.de/equity/sappi"
-    
     print(f"Navigating to {url}")
-    # Open the website using Selenium
     driver.get(url)
     
-    # Wait for the page to load completely
-    print("Waiting for page to load...")
+    # Wait for page to load
     WebDriverWait(driver, 30).until(
-        lambda driver: driver.execute_script("return document.readyState") == "complete"
-    )
+        EC.presence_of_element_located((By.TAG_NAME, 'body'))
     print("Page loaded successfully")
     
-    # Save the page source to debug
-    with open("page_source.html", "w", encoding="utf-8") as f:
-        f.write(driver.page_source)
-    print("Saved page source to page_source.html for debugging")
-    
-    # Print the title to verify we're on the right page
-    print(f"Page title: {driver.title}")
-    
-    # Try to handle cookies if they appear
+    # Handle cookie consent with more robust waiting
     try:
-        print("Looking for cookie consent dialog...")
-        cookie_button = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler"))
-        )
-        print("Cookie button found, clicking...")
-        cookie_button.click()
-        time.sleep(2)
-        print("Cookies accepted")
-    except Exception as e:
-        print(f"No cookie banner found or couldn't be accepted: {e}")
-    
-    # Ensure JavaScript has fully loaded by waiting for a key element
-    try:
+        # First wait for the cookie dialog frame to be present
         WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".quotation-box, .market-data, .stockdata"))
+            EC.frame_to_be_available_and_switch_to_it((By.ID, "sp_message_iframe_764281"))
         )
-        print("Key page elements detected")
+        
+        # Then wait for the accept button
+        accept_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept all')]"))
+        )
+        accept_button.click()
+        print("Cookies accepted")
+        
+        # Switch back to main content
+        driver.switch_to.default_content()
     except Exception as e:
-        print(f"Key page elements not found: {e}")
+        print(f"Cookie handling skipped: {str(e)[:100]}...")
     
-    # Scroll slowly down the page to ensure all content loads
-    print("Scrolling page to load dynamic content...")
-    for i in range(3):
-        driver.execute_script(f"window.scrollTo(0, {i * 500});")
-        time.sleep(1)
+    # Wait for dynamic content to load
+    print("Waiting for dynamic content...")
+    WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "div.quotation-box"))
+    )
     
-    # Wait a bit longer for all dynamic content to load
-    time.sleep(5)
+    # Scroll to ensure content loads
+    print("Scrolling to load content...")
+    driver.execute_script("window.scrollTo(0, 500)")
+    time.sleep(2)
     
-    # Execute JavaScript to check if there are any loading spinners active
-    loading_spinners = driver.execute_script("""
-        return document.querySelectorAll('.app-loading-spinner-parent').length;
-    """)
-    print(f"Found {loading_spinners} loading spinners on the page")
+    # Find the specific div you're targeting
+    print("Looking for target div...")
+    target_div = WebDriverWait(driver, 20).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "div.col-12.ar-col-lg-1-3.ar-mr-lg.ar-mt"))
+    )
     
-    # Try different selectors for the target element
-    print("Searching for target element...")
-    selectors = [
-        "div.col-12.ar-col-lg-1-3.ar-mr-lg.ar-mt",
-        ".col-12.ar-col-lg-1-3",
-        ".quotation-box",
-        ".widget.quotation-box",
-        ".market-data",
-        ".stockdata"
-    ]
+    # Get all matching divs (in case there are multiple)
+    all_target_divs = driver.find_elements(By.CSS_SELECTOR, "div.col-12.ar-col-lg-1-3.ar-mr-lg.ar-mt")
+    print(f"Found {len(all_target_divs)} matching div elements")
     
-    element_found = False
-    for selector in selectors:
-        try:
-            print(f"Trying selector: {selector}")
-            element = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-            )
-            print(f"Found element with selector: {selector}")
-            element_text = element.text[:100] + "..." if len(element.text) > 100 else element.text
-            print(f"Element text: {element_text}")
-            element_found = True
-            break
-        except Exception as e:
-            print(f"Selector {selector} failed: {e}")
+    # Print content of each found div
+    for i, div in enumerate(all_target_divs, 1):
+        print(f"\nDiv {i} content:")
+        print(div.text)
+        print("-" * 50)
     
-    if not element_found:
-        print("Could not find target element with any selector")
-        
-        # Try to find any table on the page
-        tables = driver.find_elements(By.TAG_NAME, "table")
-        print(f"Found {len(tables)} tables on the page")
-        
-        if tables:
-            print("Analyzing first table found:")
-            first_table = tables[0]
-            rows = first_table.find_elements(By.TAG_NAME, "tr")
-            print(f"Found {len(rows)} rows in first table")
-            
-            for idx, row in enumerate(rows[:3]):  # First 3 rows
-                cells = row.find_elements(By.TAG_NAME, "td")
-                cell_texts = [cell.text for cell in cells]
-                print(f"Row {idx+1}: {cell_texts}")
+    # Alternative: If you need specific data points, you can find child elements
+    if all_target_divs:
+        first_div = all_target_divs[0]
+        # Example: Find all spans within the div
+        spans = first_div.find_elements(By.TAG_NAME, "span")
+        print(f"\nFound {len(spans)} span elements in first div")
+        for span in spans[:5]:  # Print first 5 spans
+            print(span.text)
     
-    # Parse with BeautifulSoup for analysis
-    print("Parsing page with BeautifulSoup...")
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    
-    # Get all widgets on the page
-    widgets = soup.select(".widget")
-    print(f"Found {len(widgets)} widgets on the page")
-    
-    # Look for any table in the page
-    tables = soup.find_all("table")
-    print(f"Found {len(tables)} tables with BeautifulSoup")
-    
-    # If tables exist, analyze the first one
-    if tables:
-        print("Analyzing first table:")
-        first_table = tables[0]
-        rows = first_table.find_all("tr")
-        print(f"Table has {len(rows)} rows")
-        
-        for idx, row in enumerate(rows[:3]):  # First 3 rows
-            cells = row.find_all("td")
-            cell_texts = [cell.get_text(strip=True) for cell in cells]
-            print(f"Row {idx+1}: {cell_texts}")
-            
-    # Check if there's a div with class containing both "col-12" and "ar-col-lg-1-3"
-    target_divs = [div for div in soup.find_all("div") 
-                  if div.get("class") and "col-12" in div.get("class") and "ar-col-lg-1-3" in div.get("class")]
-    
-    print(f"Found {len(target_divs)} divs with both 'col-12' and 'ar-col-lg-1-3' classes")
-    
-    # Get the actual class names of some key divs to see what's available
-    print("\nExamining div class names:")
-    for idx, div in enumerate(soup.find_all("div", class_=True)[:20]):  # First 20 divs with classes
-        class_names = div.get("class")
-        if any(c for c in class_names if "col-" in c or "widget" in c):
-            print(f"Div {idx+1}: classes={class_names}")
-
 except Exception as e:
-    print(f"Main exception occurred: {e}")
-    print("Traceback:")
-    traceback.print_exc()
+    print(f"Error occurred: {str(e)[:200]}")
+    # Save screenshot for debugging
+    driver.save_screenshot('error_screenshot.png')
+    print("Saved screenshot to error_screenshot.png")
 finally:
-    # Close the WebDriver
-    try:
-        if 'driver' in locals():
-            driver.quit()
-            print("WebDriver closed successfully")
-    except Exception as e:
-        print(f"Error closing WebDriver: {e}")
+    if 'driver' in locals():
+        driver.quit()
+        print("WebDriver closed")
 
 print("Script completed")
